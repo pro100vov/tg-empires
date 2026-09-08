@@ -50,11 +50,13 @@ export function hapticResult(type: 'error' | 'success' | 'warning'): void {
 export function devId(): string {
   const fromQuery = new URLSearchParams(window.location.search).get('dev');
   if (fromQuery) return fromQuery;
+  // sessionStorage, а не localStorage: иначе две вкладки одного браузера
+  // считались бы одним и тем же игроком, и партия не набирала бы состав.
   const key = 'tge-dev-id';
-  let id = localStorage.getItem(key);
+  let id = sessionStorage.getItem(key);
   if (!id) {
     id = `dev-${Math.floor(Math.random() * 100000)}`;
-    localStorage.setItem(key, id);
+    sessionStorage.setItem(key, id);
   }
   return id;
 }
