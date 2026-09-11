@@ -22,9 +22,12 @@ export async function startBot(config: BotConfig): Promise<Bot> {
   const bot = new Bot(config.token);
   const me = await bot.api.getMe();
 
-  /** Ссылка для пересылки друзьям: открывает Mini App сразу в нужной комнате. */
+  /** Ссылка для пересылки: друг пишет боту и получает кнопку Mini App. */
   const inviteLink = (code: string) =>
-    `https://t.me/${me.username}/${config.shortName}?startapp=${code}`;
+    `https://t.me/${me.username}?start=${code}`;
+
+  const playKeyboard = () =>
+    new InlineKeyboard().webApp('🎮 Играть', config.webAppUrl);
 
   const openKeyboard = (code: string) =>
     new InlineKeyboard()
@@ -47,8 +50,17 @@ export async function startBot(config: BotConfig): Promise<Bot> {
       });
       return;
     }
-    await ctx.reply(HELP, { parse_mode: 'HTML' });
+    await ctx.reply(HELP, {
+      parse_mode: 'HTML',
+      reply_markup: playKeyboard(),
+    });
   });
+
+  bot.command('play', (ctx) =>
+    ctx.reply('Откройте игру кнопкой ниже — не через старое окно Mini App.', {
+      reply_markup: playKeyboard(),
+    }),
+  );
 
   bot.command('help', (ctx) => ctx.reply(HELP, { parse_mode: 'HTML' }));
 
@@ -88,10 +100,21 @@ export async function startBot(config: BotConfig): Promise<Bot> {
   });
 
   await bot.api.setMyCommands([
+    { command: 'play', description: 'Открыть игру' },
     { command: 'newgame', description: 'Создать новую партию' },
     { command: 'join', description: 'Присоединиться по коду' },
     { command: 'help', description: 'Правила и команды' },
   ]);
+
+  if (config.webAppUrl.startsWith('https://')) {
+    await bot.api.setChatMenuButton({
+      menu_button: {
+        type: 'web_app',
+        text: 'Играть',
+        web_app: { url: config.webAppUrl },
+      },
+    });
+  }
 
   void bot.start({ onStart: () => console.log(`[bot] @${me.username} запущен`) });
   return bot;

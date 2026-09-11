@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
-import type { GameAction, GameState } from '@tge/shared';
+import { actingPlayerId } from '@tge/shared';
+import type { GameAction, GameFx, GameState, LobbyAction } from '@tge/shared';
 import { connect, request } from './net';
 import { hapticResult, roomCodeFromEnvironment } from './telegram';
 import Lobby from './components/Lobby';
@@ -19,6 +20,21 @@ export default function App() {
   const [state, setState] = useState<GameState | null>(null);
   const [toast, setToast] = useState('');
   const [fatal, setFatal] = useState('');
+  const [fx, setFx] = useState<GameFx | null>(null);
+  const fxSeqRef = useRef(0);
+
+  const applyWithFx = useCallback((next: GameState, nextFx?: GameFx) => {
+    setState(next);
+    if (nextFx?.kind === 'move' || nextFx?.kind === 'shoot' || nextFx?.kind === 'charge') {
+      const seq = ++fxSeqRef.current;
+      setFx(nextFx);
+      window.setTimeout(() => {
+        if (fxSeqRef.current === seq) setFx(null);
+      }, nextFx.kind === 'move' ? 820 : 1000);
+      return;
+    }
+    setFx(null);
+  }, []);
 
   // Код комнаты держим отдельно от состояния: он нужен обработчику connect,
   // который переживает разрывы связи и перезапуски сервера.
@@ -32,6 +48,7 @@ export default function App() {
     socketRef.current = socket;
 
     socket.on('connect', () => {
+      setFatal('');
       setConnected(true);
       const roomCode = roomRef.current;
       if (!roomCode) return;
@@ -45,15 +62,22 @@ export default function App() {
       });
     });
     socket.on('disconnect', () => setConnected(false));
-    socket.on('connect_error', (err) => setFatal(err.message));
+    let errors = 0;
+    socket.on('connect_error', (err) => {
+      errors += 1;
+      if (errors >= 4) setFatal(err.message);
+    });
     socket.on('me', (user: Me) => setMe(user));
     socket.on('state', (next: GameState) => setState(next));
+    socket.on('update', (payload: { state: GameState; fx?: GameFx }) => {
+      applyWithFx(payload.state, payload.fx);
+    });
 
     return () => {
       socket.close();
       socketRef.current = null;
     };
-  }, []);
+  }, [applyWithFx]);
 
   const joinRoom = useCallback(async (roomCode: string) => {
     const socket = socketRef.current;
@@ -71,6 +95,14 @@ export default function App() {
     else setToast(response.error);
   }, []);
 
+  const createSolo = useCallback(async () => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    const response = await request(socket, 'room:solo', {});
+    if (response.ok) setState(response.state);
+    else setToast(response.error);
+  }, []);
+
   const startGame = useCallback(async () => {
     const socket = socketRef.current;
     if (!socket) return;
@@ -79,18 +111,29 @@ export default function App() {
     else setToast(response.error);
   }, []);
 
-  const act = useCallback(async (action: GameAction) => {
+  const lobbyAct = useCallback(async (action: LobbyAction) => {
     const socket = socketRef.current;
-    if (!socket) return false;
-    const response = await request(socket, 'game:action', { action });
-    if (response.ok) {
-      setState(response.state);
-      return true;
-    }
-    setToast(response.error);
-    hapticResult('error');
-    return false;
+    if (!socket) return;
+    const response = await request(socket, 'lobby:action', { action });
+    if (response.ok) setState(response.state);
+    else setToast(response.error);
   }, []);
+
+  const act = useCallback(
+    async (action: GameAction) => {
+      const socket = socketRef.current;
+      if (!socket) return { ok: false as const };
+      const response = await request(socket, 'game:action', { action });
+      if (response.ok) {
+        applyWithFx(response.state, response.fx);
+        return { ok: true as const, fx: response.fx, state: response.state };
+      }
+      setToast(response.error);
+      hapticResult('error');
+      return { ok: false as const };
+    },
+    [applyWithFx],
+  );
 
   // Ссылка-приглашение сразу приводит игрока в нужную комнату.
   const autoJoined = useRef(false);
@@ -127,11 +170,13 @@ export default function App() {
           state={state}
           me={me}
           onCreate={createRoom}
+          onSolo={createSolo}
           onJoin={joinRoom}
           onStart={startGame}
+          onLobby={lobbyAct}
         />
       ) : (
-        <GameScreen state={state} meId={me.id} act={act} notify={setToast} />
+        <GameScreen state={state} meId={actingPlayerId(state, me.id)} viewerId={me.id} act={act} notify={setToast} fx={fx} />
       )}
       <Toast message={toast} onHide={() => setToast('')} />
     </>

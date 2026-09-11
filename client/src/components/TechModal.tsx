@@ -1,20 +1,22 @@
-import { TECHS, canAfford, techCost } from '@tge/shared';
-import type { Player, TechType } from '@tge/shared';
+import { canAfford, techCost, techsFor } from '@tge/shared';
+import type { EraId, Player, TechType } from '@tge/shared';
 
 interface Props {
   player: Player;
   isMyTurn: boolean;
+  era: EraId;
   onResearch: (tech: TechType) => void;
   onClose: () => void;
 }
 
-export default function TechModal({ player, isMyTurn, onResearch, onClose }: Props) {
+export default function TechModal({ player, isMyTurn, era, onResearch, onClose }: Props) {
+  const catalog = techsFor(era);
   return (
     <div className="overlay" onClick={onClose}>
       <div className="overlay-card sheet" onClick={(e) => e.stopPropagation()}>
         <div className="panel-title">Технологии державы</div>
-        {(Object.keys(TECHS) as TechType[]).map((key) => {
-          const info = TECHS[key];
+        {(Object.keys(catalog) as TechType[]).map((key) => {
+          const info = catalog[key];
           const level = player.tech[key];
           const maxed = level >= info.maxLevel;
           const cost = techCost(level);
@@ -33,7 +35,7 @@ export default function TechModal({ player, isMyTurn, onResearch, onClose }: Pro
                 disabled={maxed || !affordable || !isMyTurn}
                 onClick={() => onResearch(key)}
               >
-                {maxed ? 'макс.' : `🪙${cost.gold} ⚙️${cost.iron}`}
+                {maxed ? 'макс.' : `🪙${cost.gold} 🔩${cost.iron}`}
               </button>
             </div>
           );

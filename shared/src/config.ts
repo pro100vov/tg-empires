@@ -1,17 +1,24 @@
-import type { BuildingType, Resources, TechType, TerrainType } from './types.js';
+import type { BuildingType, GameSettings, Resources, TechType, TerrainType } from './types.js';
 
 export const MAX_PLAYERS = 4;
 export const MIN_PLAYERS = 2;
 export const MAX_ROUNDS = 30;
-export const BASE_ACTIONS = 3;
+/** Сторона гексагональной карты в клетках (столбцы × ряды). */
+export const MAP_SIZE = 10;
+export const MAP_SIZES = [8, 10, 12, 14] as const;
+export const ROUND_OPTIONS = [20, 30, 40, 50] as const;
+export const ACTION_OPTIONS = [3, 4, 5, 6] as const;
+/** Ширина bounding-box pointy-top гекса, px. Высота = round(width * 2 / √3). */
+export const HEX_WIDTH = 52;
+export const HEX_HEIGHT = Math.round((HEX_WIDTH * 2) / Math.sqrt(3));
+export const HEX_COL_STEP = HEX_WIDTH;
+export const HEX_ROW_STEP = Math.round(HEX_HEIGHT * 0.75);
+export const BASE_ACTIONS = 5;
 export const MAX_TECH_LEVEL = 5;
 export const MAX_LOGISTICS_LEVEL = 3;
 
 export const START_RESOURCES: Resources = { gold: 60, food: 40, iron: 20 };
 export const CAPITAL_START_ARMY = 6;
-
-/** Стоимость одного отряда при найме. */
-export const UNIT_COST: Resources = { gold: 8, food: 0, iron: 4 };
 
 /** Одна единица еды кормит два отряда за ход. */
 export const UPKEEP_UNITS_PER_FOOD = 2;
@@ -23,16 +30,19 @@ export interface TerrainInfo {
   name: string;
   passable: boolean;
   income: Partial<Resources>;
+  /** Укрытие в ближнем бою. */
   defenseBonus: number;
+  /** Укрытие от залпа. */
+  missileCover: number;
   color: string;
 }
 
 export const TERRAIN: Record<TerrainType, TerrainInfo> = {
-  plains: { name: 'Равнина', passable: true, income: { food: 2, gold: 1 }, defenseBonus: 0, color: '#7fb069' },
-  forest: { name: 'Лес', passable: true, income: { food: 1, iron: 1 }, defenseBonus: 0.2, color: '#3f7d4f' },
-  hills: { name: 'Холмы', passable: true, income: { gold: 1, iron: 2 }, defenseBonus: 0.35, color: '#a9855b' },
-  mountains: { name: 'Горы', passable: false, income: {}, defenseBonus: 0, color: '#6b6b76' },
-  water: { name: 'Море', passable: false, income: {}, defenseBonus: 0, color: '#2f6690' },
+  plains: { name: 'Равнина', passable: true, income: { food: 2, gold: 1 }, defenseBonus: 0, missileCover: 0, color: '#7fb069' },
+  forest: { name: 'Лес', passable: true, income: { food: 1, iron: 1 }, defenseBonus: 0.06, missileCover: 0.4, color: '#3f7d4f' },
+  hills: { name: 'Холмы', passable: true, income: { gold: 1, iron: 2 }, defenseBonus: 0.28, missileCover: 0.16, color: '#a9855b' },
+  mountains: { name: 'Горы', passable: false, income: {}, defenseBonus: 0, missileCover: 0, color: '#6b6b76' },
+  water: { name: 'Море', passable: false, income: {}, defenseBonus: 0, missileCover: 0, color: '#2f6690' },
 };
 
 export interface BuildingInfo {
@@ -41,6 +51,8 @@ export interface BuildingInfo {
   income: Partial<Resources>;
   defenseBonus: number;
   allowsRecruit: boolean;
+  /** Сколько ваших ходов стройка занимает после закладки. */
+  buildTurns: number;
   icon: string;
   description: string;
 }
@@ -52,6 +64,7 @@ export const BUILDINGS: Record<BuildingType, BuildingInfo> = {
     income: { food: 2 },
     defenseBonus: 0,
     allowsRecruit: false,
+    buildTurns: 1,
     icon: '🌾',
     description: '+2 еды в ход',
   },
@@ -61,6 +74,7 @@ export const BUILDINGS: Record<BuildingType, BuildingInfo> = {
     income: { iron: 2 },
     defenseBonus: 0,
     allowsRecruit: false,
+    buildTurns: 2,
     icon: '⛏️',
     description: '+2 железа в ход',
   },
@@ -70,8 +84,19 @@ export const BUILDINGS: Record<BuildingType, BuildingInfo> = {
     income: { gold: 3 },
     defenseBonus: 0,
     allowsRecruit: false,
+    buildTurns: 2,
     icon: '🏛️',
     description: '+3 золота в ход',
+  },
+  palisade: {
+    name: 'Частокол',
+    cost: { gold: 10, iron: 5 },
+    income: {},
+    defenseBonus: 0.25,
+    allowsRecruit: false,
+    buildTurns: 1,
+    icon: '🪵',
+    description: '+25% к защите клетки',
   },
   fort: {
     name: 'Крепость',
@@ -79,6 +104,7 @@ export const BUILDINGS: Record<BuildingType, BuildingInfo> = {
     income: {},
     defenseBonus: 0.5,
     allowsRecruit: false,
+    buildTurns: 3,
     icon: '🏰',
     description: '+50% к защите клетки',
   },
@@ -88,6 +114,7 @@ export const BUILDINGS: Record<BuildingType, BuildingInfo> = {
     income: {},
     defenseBonus: 0.2,
     allowsRecruit: true,
+    buildTurns: 2,
     icon: '⚔️',
     description: 'Найм войск вне столицы, +20% к защите',
   },
@@ -109,6 +136,22 @@ export const TECHS: Record<TechType, TechInfo> = {
 
 export function techCost(level: number): Resources {
   return { gold: 40 * (level + 1), food: 0, iron: 20 * (level + 1) };
+}
+
+export function defaultGameSettings(): GameSettings {
+  return {
+    mapSize: MAP_SIZE,
+    terrainMode: 'random',
+    fogOfWar: true,
+    maxRounds: MAX_ROUNDS,
+    startGold: START_RESOURCES.gold,
+    startFood: START_RESOURCES.food,
+    startIron: START_RESOURCES.iron,
+    startArmy: CAPITAL_START_ARMY,
+    actionsPerTurn: BASE_ACTIONS,
+    hotseat: false,
+    era: 'ancient',
+  };
 }
 
 export const PLAYER_COLORS = ['#e05263', '#3f8efc', '#f2b705', '#57cc99'];

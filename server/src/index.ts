@@ -7,8 +7,8 @@ import dotenv from 'dotenv';
 import express from 'express';
 import { Server } from 'socket.io';
 
-import { addPlayer, applyAction, autoEndTurnIfExhausted, removePlayer, startGame } from '@tge/shared';
-import type { GameAction, GameState } from '@tge/shared';
+import { addPlayer, applyAction, applyLobbyAction, autoEndTurnIfExhausted, actingPlayerId, maskFxFor, maskStateFor, rememberSeenBuildings, removePlayer, setupHotseat, startGame } from '@tge/shared';
+import type { GameAction, GameFx, GameState, LobbyAction } from '@tge/shared';
 
 import { devUser, verifyInitData } from './auth.js';
 import type { AuthUser } from './auth.js';
@@ -48,11 +48,27 @@ io.use((socket, next) => {
   next();
 });
 
-function broadcast(state: GameState): void {
-  io.to(state.roomCode).emit('state', state);
+function viewOf(state: GameState, userId: string): GameState {
+  const viewer = actingPlayerId(state, userId);
+  rememberSeenBuildings(state, viewer);
+  return maskStateFor(state, viewer);
 }
 
-type Ack = (response: { ok: true; state: GameState } | { ok: false; error: string }) => void;
+async function pushState(state: GameState, payload?: { fx?: GameFx; skip?: string }): Promise<void> {
+  const sockets = await io.in(state.roomCode).fetchSockets();
+  for (const s of sockets) {
+    if (payload?.skip && s.id === payload.skip) continue;
+    const uid = (s.data as SocketData).user.id;
+    const view = viewOf(state, uid);
+    if (payload && 'fx' in payload) {
+      s.emit('update', { state: view, fx: maskFxFor(state, actingPlayerId(state, uid), payload.fx) });
+    } else {
+      s.emit('state', view);
+    }
+  }
+}
+
+type Ack = (response: { ok: true; state: GameState; fx?: GameFx } | { ok: false; error: string }) => void;
 
 io.on('connection', (socket) => {
   const data = socket.data as SocketData;
@@ -60,6 +76,10 @@ io.on('connection', (socket) => {
   socket.emit('me', user);
 
   const joinState = (state: GameState, ack?: Ack) => {
+    if (state.settings.hotseat && user.id !== state.hostId && !state.players.some((p) => p.id === user.id)) {
+      ack?.({ ok: false, error: 'Это партия сам с собой' });
+      return;
+    }
     const result = addPlayer(state, user.id, user.name);
     if (!result.ok) {
       ack?.({ ok: false, error: result.error });
@@ -67,12 +87,24 @@ io.on('connection', (socket) => {
     }
     data.roomCode = state.roomCode;
     void socket.join(state.roomCode);
-    ack?.({ ok: true, state });
-    broadcast(state);
+    ack?.({ ok: true, state: viewOf(state, user.id) });
+    void pushState(state);
   };
 
   socket.on('room:create', (_payload: unknown, ack?: Ack) => {
     joinState(createRoom(user.id), ack);
+  });
+
+  socket.on('room:solo', (_payload: unknown, ack?: Ack) => {
+    const state = createRoom(user.id);
+    const result = setupHotseat(state, user.id, user.name);
+    if (!result.ok) {
+      ack?.({ ok: false, error: result.error });
+      return;
+    }
+    data.roomCode = state.roomCode;
+    void socket.join(state.roomCode);
+    ack?.({ ok: true, state: viewOf(state, user.id) });
   });
 
   socket.on('room:join', (payload: { roomCode?: string }, ack?: Ack) => {
@@ -90,8 +122,18 @@ io.on('connection', (socket) => {
     if (!state) return ack?.({ ok: false, error: 'Комната не найдена' });
     const result = startGame(state, user.id);
     if (!result.ok) return ack?.({ ok: false, error: result.error });
-    ack?.({ ok: true, state });
-    broadcast(state);
+    ack?.({ ok: true, state: viewOf(state, user.id) });
+    void pushState(state);
+  });
+
+  socket.on('lobby:action', (payload: { action?: LobbyAction }, ack?: Ack) => {
+    const state = data.roomCode ? getRoom(data.roomCode) : undefined;
+    if (!state) return ack?.({ ok: false, error: 'Комната не найдена' });
+    if (!payload?.action) return ack?.({ ok: false, error: 'Пустое действие' });
+    const result = applyLobbyAction(state, user.id, payload.action);
+    if (!result.ok) return ack?.({ ok: false, error: result.error });
+    ack?.({ ok: true, state: viewOf(state, user.id) });
+    void pushState(state);
   });
 
   socket.on('game:action', (payload: { action?: GameAction }, ack?: Ack) => {
@@ -99,11 +141,14 @@ io.on('connection', (socket) => {
     if (!state) return ack?.({ ok: false, error: 'Комната не найдена' });
     if (!payload?.action) return ack?.({ ok: false, error: 'Пустое действие' });
 
-    const result = applyAction(state, user.id, payload.action);
+    const actor =
+      payload.action.type === 'squareReply' ? user.id : actingPlayerId(state, user.id);
+    const result = applyAction(state, actor, payload.action);
     if (!result.ok) return ack?.({ ok: false, error: result.error });
+    const fx = maskFxFor(state, actor, result.fx);
     autoEndTurnIfExhausted(state);
-    ack?.({ ok: true, state });
-    broadcast(state);
+    ack?.({ ok: true, state: viewOf(state, user.id), fx });
+    void pushState(state, { fx: result.fx, skip: socket.id });
   });
 
   socket.on('disconnect', () => {
@@ -112,13 +157,22 @@ io.on('connection', (socket) => {
     // Комната переживает выход игроков: перезагрузка страницы или переход по
     // ссылке не должны стирать партию. Пустые комнаты убирает уборщик по TTL.
     removePlayer(state, user.id);
-    broadcast(state);
+    void pushState(state);
   });
 });
 
 startRoomCleanup();
 
-httpServer.listen(PORT, () => {
+httpServer.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`[server] порт ${PORT} уже занят`);
+    process.exit(1);
+  }
+  console.error('[server]', err);
+  process.exit(1);
+});
+
+httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`[server] http://localhost:${PORT}`);
   if (!DEV_MODE && !BOT_TOKEN) {
     console.warn('[server] BOT_TOKEN не задан — вход через Telegram работать не будет');
