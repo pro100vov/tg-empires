@@ -24,6 +24,8 @@ interface Props {
   onJoin: (code: string) => void;
   onStart: () => void;
   onLobby: (action: LobbyAction) => void;
+  onLeave: () => void;
+  onInvite: (playerId: string) => void;
 }
 
 const BRUSHES: TerrainType[] = ['plains', 'forest', 'hills', 'mountains', 'water'];
@@ -35,10 +37,11 @@ const BRUSH_ICON: Record<TerrainType, string> = {
   water: '🌊',
 };
 
-export default function Lobby({ state, me, onCreate, onSolo, onJoin, onStart, onLobby }: Props) {
+export default function Lobby({ state, me, onCreate, onSolo, onJoin, onStart, onLobby, onLeave, onInvite }: Props) {
   const [code, setCode] = useState('');
   const [copied, setCopied] = useState(false);
   const [brush, setBrush] = useState<TerrainType>('forest');
+  const [leaving, setLeaving] = useState(false);
 
   if (!state) {
     return (
@@ -93,7 +96,9 @@ export default function Lobby({ state, me, onCreate, onSolo, onJoin, onStart, on
 
   const isHost = state.hostId === me.id;
   const canEdit = isLobbyAdmin(state, me.id);
-  const enough = state.players.length >= MIN_PLAYERS;
+  const seated = state.players.filter((p) => !p.left);
+  const enough = seated.length >= MIN_PLAYERS;
+  const iLeft = Boolean(state.players.find((p) => p.id === me.id)?.left);
   const settings = state.settings;
   const era = eraOf(settings);
 
@@ -117,16 +122,30 @@ export default function Lobby({ state, me, onCreate, onSolo, onJoin, onStart, on
 
       <div className="card">
         {state.players.map((player) => (
-          <div key={player.id} className="player-row">
+          <div key={player.id} className={`player-row${player.left ? ' dimmed' : ''}`}>
             <span className="dot" style={{ background: player.color }} />
             <span className="grow">{player.name}</span>
-            {player.id === state.hostId && <span className="tag">хост</span>}
-            {player.id !== state.hostId && state.adminIds.includes(player.id) && (
+            {player.id === state.hostId && !player.left && <span className="tag">хост</span>}
+            {player.id !== state.hostId && state.adminIds.includes(player.id) && !player.left && (
               <span className="tag">админ</span>
             )}
             {player.id === me.id && <span className="tag">вы</span>}
             {isHotseatRival(player.id) && <span className="tag">вторая держава</span>}
-            {isHost && player.id !== me.id && !isHotseatRival(player.id) && (
+            {player.left && <span className="tag">вышел</span>}
+            {!player.left && !player.connected && <span className="tag">не в сети</span>}
+            {player.left && !iLeft && !isHotseatRival(player.id) && (
+              <button
+                type="button"
+                className="btn tiny"
+                onClick={() => {
+                  haptic('light');
+                  onInvite(player.id);
+                }}
+              >
+                вернуть
+              </button>
+            )}
+            {isHost && player.id !== me.id && !player.left && !isHotseatRival(player.id) && (
               <button
                 type="button"
                 className="btn tiny"
@@ -384,6 +403,31 @@ export default function Lobby({ state, me, onCreate, onSolo, onJoin, onStart, on
           <p className="muted center-text">
             {canEdit ? 'Вы админ: настраивайте карту. Старт — у хоста.' : 'Ждём, когда хост начнёт партию…'}
           </p>
+        )}
+
+        {leaving ? (
+          <div className="leave-confirm">
+            <p className="muted small">Выйти? Слот сохранится — вас смогут пригласить обратно.</p>
+            <div className="choice-row">
+              <button type="button" className="btn" onClick={() => setLeaving(false)}>
+                Остаться
+              </button>
+              <button
+                type="button"
+                className="btn danger"
+                onClick={() => {
+                  haptic('medium');
+                  onLeave();
+                }}
+              >
+                Выйти из партии
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button type="button" className="btn" onClick={() => setLeaving(true)}>
+            Выйти из партии
+          </button>
         )}
       </div>
     </div>

@@ -75,6 +75,11 @@ export interface Player {
   actionsLeft: number;
   alive: boolean;
   connected: boolean;
+  /**
+   * Явно вышел из партии. Слот и держава остаются, пока кто-то не пригласит
+   * обратно или пока не выйдут все.
+   */
+  left: boolean;
   /** Увиденные чужие постройки: ключ "x,y". Не забываются. */
   seenBuildings: Record<string, BuildingType>;
 }
@@ -107,6 +112,8 @@ export interface PendingSquare {
   count: number;
   unit?: UnitId;
   charging: boolean;
+  /** Соседние клетки, чьи отряды бьют вместе с атакующим. */
+  supportFrom?: Coord[];
 }
 
 export interface LogEntry {
@@ -136,7 +143,7 @@ export interface GameState {
 }
 
 export type GameAction =
-  | { type: 'move'; from: Coord; to: Coord; count: number; unit?: UnitId }
+  | { type: 'move'; from: Coord; to: Coord; count: number; unit?: UnitId; supportFrom?: Coord[] }
   | { type: 'shoot'; from: Coord; to: Coord }
   | { type: 'build'; at: Coord; building: BuildingType }
   | { type: 'recruit'; at: Coord; count: number; unit?: UnitId }

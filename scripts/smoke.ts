@@ -46,6 +46,10 @@ import {
   startGame,
   setupHotseat,
   isLobbyAdmin,
+  invitePlayerBack,
+  leavePlayer,
+  playerById,
+  roomAbandoned,
   hasLineOfSight,
   hexDistance,
   hexLine,
@@ -206,6 +210,7 @@ function checkJointAttack(): void {
     from: { x: striker.x, y: striker.y },
     to: { x: target.x, y: target.y },
     count: 1,
+    supportFrom: [{ x: ally.x, y: ally.y }],
   });
   assert.ok(result.ok);
   assert.equal(result.ok && result.fx?.battle, 'won', 'два отряда вместе берут цель, которую один не взял бы');
@@ -213,6 +218,8 @@ function checkJointAttack(): void {
   assert.ok(armyCount(target.army) >= 1, 'на захваченной клетке остаётся ударный отряд');
   assert.equal(ally.ownerId, me.id, 'второй отряд остаётся на своей клетке');
   assert.ok(armyCount(ally.army) > 0, 'второй отряд не телепортируется');
+  assert.equal(ally.movesLeft, 0, 'помощник после совместного удара больше не ходит');
+  assert.equal(ally.shotsLeft, 0, 'помощник после совместного удара не стреляет');
   console.log('✓ совместный удар двух отрядов');
 }
 
@@ -1363,6 +1370,53 @@ function checkLobbySettings(): void {
   console.log('✓ лобби: размер карты, рельеф, туман, админ');
 }
 
+function checkLeaveAndInvite(): void {
+  const lobby = createGame('LEAVE1', 'p1', 1);
+  addPlayer(lobby, 'p1', 'Хост');
+  addPlayer(lobby, 'p2', 'Гость');
+  addPlayer(lobby, 'p3', 'Третий');
+  assert.ok(leavePlayer(lobby, 'p3').ok);
+  assert.equal(playerById(lobby, 'p3')!.left, true);
+  assert.equal(addPlayer(lobby, 'p3', 'Третий').ok, false, 'вышедший сам не возвращается');
+  assert.ok(invitePlayerBack(lobby, 'p1', 'p3').ok);
+  assert.equal(playerById(lobby, 'p3')!.left, false);
+  assert.ok(leavePlayer(lobby, 'p3').ok);
+  assert.ok(startGame(lobby, 'p1').ok, 'вышедший до старта не занимает место');
+  assert.equal(lobby.players.length, 2);
+  assert.equal(lobby.players.some((p) => p.id === 'p3'), false);
+
+  const state = newGame();
+  const first = currentPlayer(state)!;
+  const other = state.players.find((p) => p.id !== first.id)!;
+  const cap = state.tiles.find((t) => t.capitalOf === first.id);
+  assert.ok(cap);
+  assert.ok(leavePlayer(state, first.id).ok);
+  assert.equal(playerById(state, first.id)!.left, true);
+  assert.equal(playerById(state, first.id)!.alive, true, 'держава остаётся на слоте');
+  assert.equal(state.tiles.find((t) => t.capitalOf === first.id)?.capitalOf, first.id);
+  assert.equal(currentPlayer(state)!.id, other.id, 'ход переходит, если вышедший ходил');
+  assert.equal(addPlayer(state, first.id, first.name).ok, false);
+  assert.equal(invitePlayerBack(state, first.id, other.id).ok, false, 'вышедший не приглашает');
+  assert.ok(invitePlayerBack(state, other.id, first.id).ok);
+  assert.equal(playerById(state, first.id)!.left, false);
+  assert.ok(addPlayer(state, first.id, first.name).ok, 'после приглашения слот снова свой');
+
+  const last = createGame('LEAVE2', 'a', 2);
+  addPlayer(last, 'a', 'А');
+  addPlayer(last, 'b', 'Б');
+  assert.ok(leavePlayer(last, 'a').ok);
+  assert.equal(last.hostId, 'b', 'хост переходит к оставшемуся');
+  assert.equal(roomAbandoned(last), false);
+  assert.ok(leavePlayer(last, 'b').ok);
+  assert.equal(roomAbandoned(last), true, 'пустая партия удаляется из памяти');
+
+  const solo = createGame('SOLOL', 'p1', 3);
+  assert.ok(setupHotseat(solo, 'p1', 'Хост').ok);
+  assert.ok(leavePlayer(solo, 'p1').ok);
+  assert.equal(roomAbandoned(solo), true, 'выход из партии сам с собой удаляет комнату');
+  console.log('✓ выход из партии, слот и приглашение обратно');
+}
+
 function checkHotseat(): void {
   const state = createGame('SOLO1', 'p1', 42);
   assert.ok(setupHotseat(state, 'p1', 'Хост').ok);
@@ -1756,6 +1810,7 @@ function checkSquare(): void {
 
 checkStart();
 checkLobbySettings();
+checkLeaveAndInvite();
 checkHotseat();
 checkEras();
 checkSquare();

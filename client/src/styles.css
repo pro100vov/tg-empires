@@ -171,6 +171,45 @@ body {
   border-radius: 8px;
 }
 
+.btn.danger {
+  background: #8b2e2e;
+  color: #fff;
+}
+
+.player-row.dimmed,
+.player-chip.dimmed {
+  opacity: 0.65;
+}
+
+.player-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.player-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 4px 6px;
+}
+
+.leave-btn {
+  margin-top: 6px;
+  align-self: flex-start;
+}
+
+.leave-confirm {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .lobby-setup {
   max-width: 560px;
   display: flex;

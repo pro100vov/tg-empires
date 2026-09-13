@@ -7,13 +7,13 @@ import dotenv from 'dotenv';
 import express from 'express';
 import { Server } from 'socket.io';
 
-import { addPlayer, applyAction, applyLobbyAction, autoEndTurnIfExhausted, actingPlayerId, maskFxFor, maskStateFor, rememberSeenBuildings, removePlayer, setupHotseat, startGame } from '@tge/shared';
+import { addPlayer, applyAction, applyLobbyAction, autoEndTurnIfExhausted, actingPlayerId, invitePlayerBack, leavePlayer, maskFxFor, maskStateFor, rememberSeenBuildings, removePlayer, setupHotseat, startGame } from '@tge/shared';
 import type { GameAction, GameFx, GameState, LobbyAction } from '@tge/shared';
 
 import { devUser, verifyInitData } from './auth.js';
 import type { AuthUser } from './auth.js';
-import { createRoom, getRoom, startRoomCleanup } from './rooms.js';
-import { startBot } from './bot.js';
+import { createRoom, discardIfAbandoned, findRoomByPlayer, getRoom, startRoomCleanup } from './rooms.js';
+import { notifyPlayerInvited, startBot } from './bot.js';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 dotenv.config({ path: path.join(rootDir, '.env') });
@@ -75,6 +75,11 @@ io.on('connection', (socket) => {
   const { user } = data;
   socket.emit('me', user);
 
+  const attach = (state: GameState) => {
+    data.roomCode = state.roomCode;
+    void socket.join(state.roomCode);
+  };
+
   const joinState = (state: GameState, ack?: Ack) => {
     if (state.settings.hotseat && user.id !== state.hostId && !state.players.some((p) => p.id === user.id)) {
       ack?.({ ok: false, error: 'Это партия сам с собой' });
@@ -85,25 +90,54 @@ io.on('connection', (socket) => {
       ack?.({ ok: false, error: result.error });
       return;
     }
-    data.roomCode = state.roomCode;
-    void socket.join(state.roomCode);
+    attach(state);
     ack?.({ ok: true, state: viewOf(state, user.id) });
     void pushState(state);
   };
 
+  const resumeActive = (): GameState | undefined => {
+    const existing = findRoomByPlayer(user.id);
+    if (!existing) return undefined;
+    const result = addPlayer(existing, user.id, user.name);
+    if (!result.ok) return undefined;
+    attach(existing);
+    return existing;
+  };
+
+  socket.on('room:resume', (_payload: unknown, ack?: Ack) => {
+    const existing = resumeActive();
+    if (!existing) {
+      ack?.({ ok: false, error: 'Нет активной партии' });
+      return;
+    }
+    ack?.({ ok: true, state: viewOf(existing, user.id) });
+    void pushState(existing);
+  });
+
   socket.on('room:create', (_payload: unknown, ack?: Ack) => {
+    const existing = resumeActive();
+    if (existing) {
+      ack?.({ ok: true, state: viewOf(existing, user.id) });
+      void pushState(existing);
+      return;
+    }
     joinState(createRoom(user.id), ack);
   });
 
   socket.on('room:solo', (_payload: unknown, ack?: Ack) => {
+    const existing = resumeActive();
+    if (existing) {
+      ack?.({ ok: true, state: viewOf(existing, user.id) });
+      void pushState(existing);
+      return;
+    }
     const state = createRoom(user.id);
     const result = setupHotseat(state, user.id, user.name);
     if (!result.ok) {
       ack?.({ ok: false, error: result.error });
       return;
     }
-    data.roomCode = state.roomCode;
-    void socket.join(state.roomCode);
+    attach(state);
     ack?.({ ok: true, state: viewOf(state, user.id) });
   });
 
@@ -114,7 +148,43 @@ io.on('connection', (socket) => {
       ack?.({ ok: false, error: 'Комната не найдена' });
       return;
     }
+    const mine = findRoomByPlayer(user.id);
+    if (mine && mine.roomCode !== state.roomCode) {
+      ack?.({ ok: false, error: 'Сначала выйдите из текущей партии' });
+      return;
+    }
     joinState(state, ack);
+  });
+
+  socket.on('room:leave', (_payload: unknown, ack?: Ack) => {
+    const state = data.roomCode ? getRoom(data.roomCode) : findRoomByPlayer(user.id);
+    if (!state) return ack?.({ ok: false, error: 'Комната не найдена' });
+    const result = leavePlayer(state, user.id);
+    if (!result.ok) return ack?.({ ok: false, error: result.error });
+    void socket.leave(state.roomCode);
+    data.roomCode = undefined;
+    if (discardIfAbandoned(state)) {
+      ack?.({ ok: true, state: viewOf(state, user.id) });
+      return;
+    }
+    ack?.({ ok: true, state: viewOf(state, user.id) });
+    void pushState(state);
+  });
+
+  socket.on('room:invite', (payload: { playerId?: string }, ack?: Ack) => {
+    const state = data.roomCode ? getRoom(data.roomCode) : undefined;
+    if (!state) return ack?.({ ok: false, error: 'Комната не найдена' });
+    const targetId = payload?.playerId ?? '';
+    if (!targetId) return ack?.({ ok: false, error: 'Некого приглашать' });
+    const busy = findRoomByPlayer(targetId);
+    if (busy && busy.roomCode !== state.roomCode) {
+      return ack?.({ ok: false, error: 'Игрок уже в другой партии — пусть выйдет из неё' });
+    }
+    const result = invitePlayerBack(state, user.id, targetId);
+    if (!result.ok) return ack?.({ ok: false, error: result.error });
+    notifyPlayerInvited(targetId, state.roomCode, user.name);
+    ack?.({ ok: true, state: viewOf(state, user.id) });
+    void pushState(state);
   });
 
   socket.on('game:start', (_payload: unknown, ack?: Ack) => {

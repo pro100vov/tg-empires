@@ -21,6 +21,7 @@ export default function App() {
   const [toast, setToast] = useState('');
   const [fatal, setFatal] = useState('');
   const [fx, setFx] = useState<GameFx | null>(null);
+  const [booted, setBooted] = useState(false);
   const fxSeqRef = useRef(0);
 
   const applyWithFx = useCallback((next: GameState, nextFx?: GameFx) => {
@@ -50,15 +51,25 @@ export default function App() {
     socket.on('connect', () => {
       setFatal('');
       setConnected(true);
-      const roomCode = roomRef.current;
-      if (!roomCode) return;
-      void request(socket, 'room:join', { roomCode }).then((response) => {
+      void request(socket, 'room:resume', {}).then((response) => {
         if (response.ok) {
           setState(response.state);
-        } else {
-          setState(null);
-          setToast('Партия больше недоступна');
+          setBooted(true);
+          return;
         }
+        const roomCode = roomRef.current;
+        if (!roomCode) {
+          setBooted(true);
+          return;
+        }
+        void request(socket, 'room:join', { roomCode }).then((join) => {
+          if (join.ok) setState(join.state);
+          else {
+            setState(null);
+            setToast('Партия больше недоступна');
+          }
+          setBooted(true);
+        });
       });
     });
     socket.on('disconnect', () => setConnected(false));
@@ -119,6 +130,24 @@ export default function App() {
     else setToast(response.error);
   }, []);
 
+  const leaveRoom = useCallback(async () => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    const response = await request(socket, 'room:leave', {});
+    if (response.ok) {
+      roomRef.current = '';
+      setState(null);
+    } else setToast(response.error);
+  }, []);
+
+  const inviteBack = useCallback(async (playerId: string) => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    const response = await request(socket, 'room:invite', { playerId });
+    if (response.ok) setState(response.state);
+    else setToast(response.error);
+  }, []);
+
   const act = useCallback(
     async (action: GameAction) => {
       const socket = socketRef.current;
@@ -138,12 +167,13 @@ export default function App() {
   // Ссылка-приглашение сразу приводит игрока в нужную комнату.
   const autoJoined = useRef(false);
   useEffect(() => {
-    if (!connected || !me || autoJoined.current) return;
+    if (!connected || !me || !booted || autoJoined.current) return;
     const code = roomCodeFromEnvironment();
     if (!code) return;
     autoJoined.current = true;
+    if (state) return;
     void joinRoom(code);
-  }, [connected, me, joinRoom]);
+  }, [connected, me, booted, state, joinRoom]);
 
   if (fatal) {
     return (
@@ -154,7 +184,7 @@ export default function App() {
     );
   }
 
-  if (!connected || !me) {
+  if (!connected || !me || !booted) {
     return (
       <div className="screen center">
         <div className="spinner" />
@@ -174,9 +204,20 @@ export default function App() {
           onJoin={joinRoom}
           onStart={startGame}
           onLobby={lobbyAct}
+          onLeave={leaveRoom}
+          onInvite={inviteBack}
         />
       ) : (
-        <GameScreen state={state} meId={actingPlayerId(state, me.id)} viewerId={me.id} act={act} notify={setToast} fx={fx} />
+        <GameScreen
+          state={state}
+          meId={actingPlayerId(state, me.id)}
+          viewerId={me.id}
+          act={act}
+          notify={setToast}
+          fx={fx}
+          onLeave={leaveRoom}
+          onInvite={inviteBack}
+        />
       )}
       <Toast message={toast} onHide={() => setToast('')} />
     </>

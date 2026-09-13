@@ -1,8 +1,7 @@
-import { createGame, randomRoomCode, randomSeed } from '@tge/shared';
+import { createGame, playerById, randomRoomCode, randomSeed, roomAbandoned } from '@tge/shared';
 import type { GameState, RoomSummary } from '@tge/shared';
 
-const ROOM_TTL_MS = 6 * 60 * 60 * 1000;
-const EMPTY_ROOM_TTL_MS = 30 * 60 * 1000;
+const ROOM_TTL_MS = 24 * 60 * 60 * 1000;
 
 interface Room {
   state: GameState;
@@ -35,26 +34,53 @@ export function deleteRoom(code: string): void {
   rooms.delete(code.toUpperCase());
 }
 
+/** Активная партия игрока: он в слоте и не нажимал «Выйти». */
+export function findRoomByPlayer(userId: string): GameState | undefined {
+  for (const room of rooms.values()) {
+    const member = playerById(room.state, userId);
+    if (member && !member.left) {
+      room.updatedAt = Date.now();
+      return room.state;
+    }
+    if (
+      !member &&
+      room.state.hostId === userId &&
+      room.state.phase === 'lobby' &&
+      !room.state.players.some((p) => p.id === userId)
+    ) {
+      room.updatedAt = Date.now();
+      return room.state;
+    }
+  }
+  return undefined;
+}
+
+export function discardIfAbandoned(state: GameState): boolean {
+  if (!roomAbandoned(state)) return false;
+  deleteRoom(state.roomCode);
+  return true;
+}
+
 export function summarize(state: GameState): RoomSummary {
   return {
     roomCode: state.roomCode,
     hostName: state.players.find((p) => p.id === state.hostId)?.name ?? 'Хост',
     phase: state.phase,
-    playerCount: state.players.length,
+    playerCount: state.players.filter((p) => !p.left).length,
   };
 }
 
 /**
- * Комнаты живут в памяти, поэтому брошенные нужно чистить. Пустые исчезают
- * быстрее, но не мгновенно — иначе перезагрузка страницы убивала бы партию.
+ * Комнаты живут в памяти. Обрыв связи партию не убивает — удаляем только
+ * когда все явно вышли или комната сутки никто не трогал.
  */
 export function startRoomCleanup(): NodeJS.Timeout {
   return setInterval(() => {
     const now = Date.now();
     for (const [code, room] of rooms) {
-      const nobodyOnline = room.state.players.every((p) => !p.connected);
-      const ttl = nobodyOnline ? EMPTY_ROOM_TTL_MS : ROOM_TTL_MS;
-      if (now - room.updatedAt > ttl) rooms.delete(code);
+      if (roomAbandoned(room.state) || now - room.updatedAt > ROOM_TTL_MS) {
+        rooms.delete(code);
+      }
     }
   }, 5 * 60 * 1000);
 }
