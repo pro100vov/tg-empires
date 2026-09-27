@@ -516,8 +516,9 @@ function beginTurn(state: GameState): void {
     writeWings(tile, [
       {
         army: { ...tile.army },
-        movesLeft: tile.routedTurns > 0 ? Math.max(mp, 1) : mp,
-        shotsLeft: 1,
+        // Отступающие неуправляемы: без хода и залпа, пока висит бегство.
+        movesLeft: tile.routedTurns > 0 ? 0 : mp,
+        shotsLeft: tile.routedTurns > 0 ? 0 : 1,
       },
     ]);
   }
@@ -660,15 +661,39 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
 
-/** Свои стеки вплотную к цели — бьют вместе с атакующим. */
+/** Свои стеки вплотную к цели — могут бить вместе с атакующим. */
 export function allyStacksCovering(state: GameState, playerId: string, target: Coord, exclude: Coord): Tile[] {
   return neighbors(state, target).filter(
     (tile) =>
       tile.ownerId === playerId &&
       armyCount(tile.army) > 0 &&
       tile.routedTurns === 0 &&
+      tile.movesLeft > 0 &&
       !(tile.x === exclude.x && tile.y === exclude.y),
   );
+}
+
+/** Выбранные игроком помощники: только из допустимых соседних стеков. */
+export function pickSupportTiles(
+  state: GameState,
+  playerId: string,
+  target: Coord,
+  exclude: Coord,
+  requested: Coord[] | undefined,
+): { ok: true; tiles: Tile[] } | { ok: false; error: string } {
+  const allowed = allyStacksCovering(state, playerId, target, exclude);
+  if (!requested || requested.length === 0) return { ok: true, tiles: [] };
+  const picked: Tile[] = [];
+  const seen = new Set<string>();
+  for (const c of requested) {
+    const key = `${c.x},${c.y}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const tile = allowed.find((t) => t.x === c.x && t.y === c.y);
+    if (!tile) return { ok: false, error: 'Этот отряд не может помочь в атаке' };
+    picked.push(tile);
+  }
+  return { ok: true, tiles: picked };
 }
 
 function splitByRatio(parts: Army[], survivors: number): Army[] {
@@ -686,6 +711,8 @@ interface BattleOutcome {
   defenderSurvivors: Army;
   attackerRouted: boolean;
   defenderRouted: boolean;
+  attackerRoutTurns: number;
+  defenderRoutTurns: number;
 }
 
 function maybeRout(
@@ -698,6 +725,13 @@ function maybeRout(
   let chance = 0.18 + (1 - Math.min(1, ratio)) * 0.42;
   if (commander) chance *= 1 - COMMANDERS[commander].routResist;
   return nextRandom(state) < clamp(chance, 0.08, 0.72);
+}
+
+/** 1 ход бегства при лёгких потерях, 2 — если выбито ≥40% отряда. */
+function routTurnsFromLoss(before: number, after: number): number {
+  if (before <= 0) return 1;
+  const frac = (before - Math.max(0, after)) / before;
+  return frac >= 0.4 ? 2 : 1;
 }
 
 function resolveBattle(
@@ -754,12 +788,18 @@ function resolveBattle(
 
   const attackerSurvivors = scaleArmy(combined, Math.max(0, atkLeft));
   const defenderSurvivors = scaleArmy(tile.army, Math.max(0, defLeft));
+  const attackerRouted =
+    !attackerWon && armyCount(attackerSurvivors) > 0 && maybeRout(state, attackPower, defensePower, atkCommander);
+  const defenderRouted =
+    attackerWon && armyCount(defenderSurvivors) > 0 && maybeRout(state, defensePower, attackPower, tile.commander);
   return {
     attackerWon,
     attackerSurvivors,
     defenderSurvivors,
-    attackerRouted: !attackerWon && armyCount(attackerSurvivors) > 0 && maybeRout(state, attackPower, defensePower, atkCommander),
-    defenderRouted: attackerWon && armyCount(defenderSurvivors) > 0 && maybeRout(state, defensePower, attackPower, tile.commander),
+    attackerRouted,
+    defenderRouted,
+    attackerRoutTurns: attackerRouted ? routTurnsFromLoss(atkCount, armyCount(attackerSurvivors)) : 0,
+    defenderRoutTurns: defenderRouted ? routTurnsFromLoss(defCount, armyCount(defenderSurvivors)) : 0,
   };
 }
 
@@ -932,6 +972,7 @@ function applySquareReply(state: GameState, userId: string, form: boolean): Acti
       to: pending.to,
       count: pending.count,
       unit: pending.unit,
+      supportFrom: pending.supportFrom,
     });
   } finally {
     resolvingSquareOffer = false;
@@ -1022,6 +1063,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
         tile.capitalOf === playerId || (tile.building ? BUILDINGS[tile.building].allowsRecruit : false);
       if (!canHere) return { ok: false, error: 'Командира назначают в столице или казармах' };
       if (armyCount(tile.army) < 1) return { ok: false, error: 'Нужны войска на клетке' };
+      if (tile.routedTurns > 0) return { ok: false, error: 'Отступающим отрядом нельзя управлять' };
       if (tile.commander) return { ok: false, error: 'У этого стека уже есть командир' };
       const info = commandersOf(state)[action.commander];
       if (!info) return { ok: false, error: 'Неизвестный командир' };
@@ -1047,22 +1089,21 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       if (!from || !to) return { ok: false, error: 'Клетки не существует' };
       if (!TERRAIN[to.terrain].passable) return { ok: false, error: 'Через горы и море не пройти' };
       if (from.ownerId !== playerId) return { ok: false, error: 'Это не ваша клетка' };
+      if (from.routedTurns > 0) {
+        return { ok: false, error: 'Отступающим отрядом нельзя управлять' };
+      }
       if (squarePinned(state, from)) {
         return { ok: false, error: 'Каре не разойти, пока рядом вражеская конница' };
       }
       if (from.movesLeft < 1) return { ok: false, error: 'Эти войска уже исчерпали запас хода' };
       const dist = hexDistance(from, to);
       const enemyFight = to.ownerId !== playerId && armyCount(to.army) > 0;
-      if (enemyFight && from.routedTurns > 0) {
-        return { ok: false, error: 'Обращённые в бегство не могут атаковать' };
-      }
       const count = Math.floor(action.count);
       const only = action.unit && UNITS[action.unit] ? action.unit : undefined;
       const fromWings = ensureWings(from);
       const wantCharge =
         dist === 2 &&
         enemyFight &&
-        from.routedTurns === 0 &&
         to.terrain !== 'forest' &&
         chargePathOpen(state, from, to, playerId);
       const minMp = wantCharge ? CHARGE_COST : 1;
@@ -1072,12 +1113,16 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       const taken = wingsToArmy(takenWings);
       if (armyCount(taken) !== count) return { ok: false, error: 'Недостаточно войск' };
       const charging = wantCharge && armyCanCharge(taken);
-      const path = charging
-        ? null
-        : walkPath(state, from, to, playerId, 1, from.routedTurns === 0);
+      const path = charging ? null : walkPath(state, from, to, playerId, 1, true);
       if (!charging) {
         if (!path || path.length !== 2) return { ok: false, error: 'Сюда за этот ход не дойти' };
       }
+
+      const supportPick = enemyFight
+        ? pickSupportTiles(state, playerId, to, from, action.supportFrom)
+        : { ok: true as const, tiles: [] as Tile[] };
+      if (!supportPick.ok) return supportPick;
+      const allies = supportPick.tiles;
 
       if (!resolvingSquareOffer && enemyFight && shouldOfferSquare(state, taken, to)) {
         state.pendingSquare = {
@@ -1088,6 +1133,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
           count,
           unit: only,
           charging,
+          supportFrom: allies.map((tile) => ({ x: tile.x, y: tile.y })),
         };
         log(state, `${player.name}: конница на пехоту — оборона решает, вставать ли в каре.`);
         return { ok: true, events: ['square-offer'] };
@@ -1164,7 +1210,6 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
 
       if (armyCount(to.army) > 0) {
         const defender = to.ownerId ? playerById(state, to.ownerId) : undefined;
-        const allies = allyStacksCovering(state, playerId, to, from);
         const support = allies.reduce((army, tile) => mergeArmies(army, tile.army), {} as Army);
         const supportCount = armyCount(support);
         const outcome = resolveBattle(state, player, defender, taken, to, movingCommander, charging, support);
@@ -1173,12 +1218,12 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
         const applyAllyLosses = () => {
           allies.forEach((tile, i) => {
             const left = split[i + 1] ?? {};
-            tile.army = left;
             if (armyCount(left) === 0) {
               clearMarch(tile);
-            } else {
-              writeWings(tile, [{ army: left, movesLeft: tile.movesLeft, shotsLeft: tile.shotsLeft }]);
+              return;
             }
+            // Участники совместного удара больше ничего не делают в этот ход.
+            writeWings(tile, [{ army: left, movesLeft: 0, shotsLeft: 0 }]);
           });
         };
         if (outcome.attackerWon) claimPath();
@@ -1197,13 +1242,13 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
               defId,
               { x: from.x, y: from.y },
               defCmdr,
-              outcome.defenderRouted ? 2 : 0,
+              outcome.defenderRoutTurns,
             );
             if (fled.ok) {
               log(
                 state,
                 outcome.defenderRouted
-                  ? `Бой: оборона обращена в бегство${fleeLogSuffix(fled, true)}.`
+                  ? `Бой: оборона обращена в бегство на ${outcome.defenderRoutTurns} х.${fleeLogSuffix(fled, true)}.`
                   : `Бой: остатки обороны отступают${fleeLogSuffix(fled, false)}.`,
               );
             } else if (fled.lostExtra > 0 && fled.left === 0) {
@@ -1215,7 +1260,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
           occupy([{ army: moverSurvivors, movesLeft: 0, shotsLeft: 0 }], true);
           log(
             state,
-            `${charging ? chargeWord(state) : 'Бой'}: ${player.name}${supportCount > 0 ? ' бьёт вместе с соседним отрядом' : ' побеждает'}, осталось ${armyCount(outcome.attackerSurvivors)} отр.`,
+            `${charging ? chargeWord(state) : 'Бой'}: ${player.name}${supportCount > 0 ? ` бьёт вместе (${allies.length + 1} отр.)` : ' побеждает'}, осталось ${armyCount(outcome.attackerSurvivors)} отр.`,
           );
           if (capitalVictim && capitalVictim !== playerId) {
             to.capitalOf = null;
@@ -1238,7 +1283,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
             playerId,
             { x: to.x, y: to.y },
             movingCommander,
-            2,
+            outcome.attackerRoutTurns,
           );
           if (!fled.ok && fled.left > 0) {
             writeWings(from, [
@@ -1246,15 +1291,15 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
               { army: scaleArmy(moverSurvivors, fled.left), movesLeft: 0, shotsLeft: 0 },
             ]);
             if (movingCommander && !from.commander) from.commander = movingCommander;
-            from.routedTurns = Math.max(from.routedTurns, 2);
+            from.routedTurns = Math.max(from.routedTurns, outcome.attackerRoutTurns);
           }
           log(
             state,
             fled.ok
-              ? `${charging ? chargeWord(state) : 'Бой'}: атака ${player.name}${supportCount > 0 ? ' (два отряда)' : ''} обращена в бегство, уцелело ${fled.left} отр.${fleeLogSuffix(fled, true)}`
+              ? `${charging ? chargeWord(state) : 'Бой'}: атака ${player.name}${supportCount > 0 ? ' (несколько отрядов)' : ''} обращена в бегство на ${outcome.attackerRoutTurns} х., уцелело ${fled.left} отр.${fleeLogSuffix(fled, true)}`
               : fled.lostExtra > 0 && fled.left === 0
                 ? `${charging ? chargeWord(state) : 'Бой'}: атака ${player.name} зажата с тыла и уничтожена (−${fled.lostExtra} отр.).`
-                : `${charging ? chargeWord(state) : 'Бой'}: атака ${player.name}${supportCount > 0 ? ' (два отряда)' : ''} обращена в бегство, уцелело ${fled.left} отр., отходить некуда${fled.lostExtra > 0 ? `, −${fled.lostExtra} с тыла` : ''}.`,
+                : `${charging ? chargeWord(state) : 'Бой'}: атака ${player.name}${supportCount > 0 ? ' (несколько отрядов)' : ''} обращена в бегство на ${outcome.attackerRoutTurns} х., уцелело ${fled.left} отр., отходить некуда${fled.lostExtra > 0 ? `, −${fled.lostExtra} с тыла` : ''}.`,
           );
         } else {
           writeWings(from, [
@@ -1266,7 +1311,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
           }
           log(
             state,
-            `${charging ? chargeWord(state) : 'Бой'}: атака ${player.name}${supportCount > 0 ? ' (два отряда)' : ''} отбита, уцелело ${armyCount(outcome.attackerSurvivors)} отр.`,
+            `${charging ? chargeWord(state) : 'Бой'}: атака ${player.name}${supportCount > 0 ? ' (несколько отрядов)' : ''} отбита, уцелело ${armyCount(outcome.attackerSurvivors)} отр.`,
           );
         }
         events.push(outcome.attackerRouted ? 'battle-rout' : 'battle-lost');
@@ -1295,7 +1340,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       const to = tileAt(state, action.to.x, action.to.y);
       if (!from || !to) return { ok: false, error: 'Клетки не существует' };
       if (from.ownerId !== playerId) return { ok: false, error: 'Это не ваша клетка' };
-      if (from.routedTurns > 0) return { ok: false, error: 'Обращённые в бегство не могут стрелять' };
+      if (from.routedTurns > 0) return { ok: false, error: 'Отступающим отрядом нельзя управлять' };
       const dist = hexDistance(from, to);
       const shooters = volleyArmy(from.army, era(state), dist, from.terrain);
       const shots = armyCount(shooters);
@@ -1376,26 +1421,28 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
         const defId = to.ownerId!;
         const defCmdr = to.commander;
         const survivors = { ...to.army };
+        const survivorsCount = armyCount(survivors);
+        const routTurns = routTurnsFromLoss(defCount, survivorsCount);
         const movesLeft = to.movesLeft;
         const shotsLeft = to.shotsLeft;
         writeWings(to, []);
         to.commander = null;
         to.routedTurns = 0;
-        const fled = displaceArmy(state, survivors, to, defId, { x: from.x, y: from.y }, defCmdr, 2);
+        const fled = displaceArmy(state, survivors, to, defId, { x: from.x, y: from.y }, defCmdr, routTurns);
         if (!fled.ok && fled.left > 0) {
           writeWings(to, [
-            { army: scaleArmy(survivors, fled.left), movesLeft, shotsLeft },
+            { army: scaleArmy(survivors, fled.left), movesLeft: 0, shotsLeft: 0 },
           ]);
           if (defCmdr) to.commander = defCmdr;
-          to.routedTurns = Math.max(to.routedTurns, 2);
+          to.routedTurns = Math.max(to.routedTurns, routTurns);
         }
         log(
           state,
           fled.ok
-            ? `${flavorOf(state).volleyLabel} ${player.name}: −${losses} отр., гарнизон в панике${fleeLogSuffix(fled, true)}.`
+            ? `${flavorOf(state).volleyLabel} ${player.name}: −${losses} отр., гарнизон в панике на ${routTurns} х.${fleeLogSuffix(fled, true)}.`
             : fled.lostExtra > 0 && fled.left === 0
               ? `${flavorOf(state).volleyLabel} ${player.name}: −${losses} отр., гарнизон зажат с тыла и уничтожен (−${fled.lostExtra}).`
-              : `${flavorOf(state).volleyLabel} ${player.name}: −${losses} отр., гарнизон в панике${fled.lostExtra > 0 ? `, −${fled.lostExtra} с тыла` : ''}, бежать некуда.`,
+              : `${flavorOf(state).volleyLabel} ${player.name}: −${losses} отр., гарнизон в панике на ${routTurns} х.${fled.lostExtra > 0 ? `, −${fled.lostExtra} с тыла` : ''}, бежать некуда.`,
         );
       } else {
         log(state, `${flavorOf(state).volleyLabel} ${player.name}: −${losses} отр. у обороны.`);

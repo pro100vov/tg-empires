@@ -250,6 +250,7 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx }: P
   const [moveTarget, setMoveTarget] = useState<Coord | null>(null);
   const [moveCount, setMoveCount] = useState(1);
   const [moveUnit, setMoveUnit] = useState<UnitId | null>(null);
+  const [supportKeys, setSupportKeys] = useState<string[]>([]);
   const [recruitCount, setRecruitCount] = useState(1);
   const [recruitUnit, setRecruitUnit] = useState<UnitId>(DEFAULT_UNIT);
   const [sheet, setSheet] = useState<Sheet>(null);
@@ -380,6 +381,7 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx }: P
     setMoveTarget(null);
     setMoveCount(1);
     setMoveUnit(null);
+    setSupportKeys([]);
   };
 
   const run = async (action: GameAction) => {
@@ -407,6 +409,7 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx }: P
       );
       setMoveTarget({ x: tile.x, y: tile.y });
       setMoveCount(Math.max(1, available));
+      setSupportKeys([]);
       return;
     }
     if (mode === 'shoot' && fromTile && highlighted.has(coordKey(tile))) {
@@ -424,12 +427,17 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx }: P
     if (!fromTile || !targetTile) return;
     const from = { x: fromTile.x, y: fromTile.y };
     const to = { x: targetTile.x, y: targetTile.y };
+    const supportFrom = supportKeys.map((key) => {
+      const [x, y] = key.split(',').map(Number);
+      return { x: x!, y: y! };
+    });
     const result = await run({
       type: 'move',
       from,
       to,
       count: Math.min(moveCount, Math.max(fromCount, 1)),
       unit: moveUnit ?? undefined,
+      supportFrom: supportFrom.length > 0 ? supportFrom : undefined,
     });
     if (result.ok) {
       resetPick();
@@ -462,7 +470,8 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx }: P
     fromTile && targetTile && targetCount > 0 && targetTile.ownerId !== meId
       ? allyStacksCovering(state, meId, targetTile, fromTile)
       : [];
-  const coveringSupport = coveringAllies.reduce((army, tile) => mergeArmies(army, tile.army), {} as Army);
+  const selectedAllies = coveringAllies.filter((tile) => supportKeys.includes(coordKey(tile)));
+  const coveringSupport = selectedAllies.reduce((army, tile) => mergeArmies(army, tile.army), {} as Army);
   const coveringCount = armyCount(coveringSupport);
 
   const battleForecast = (() => {
@@ -516,7 +525,7 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx }: P
         selected={selected}
         highlighted={highlighted}
         chargeHighlighted={chargeHighlighted}
-        supportHighlighted={new Set(coveringAllies.map((tile) => coordKey(tile)))}
+        supportHighlighted={new Set(selectedAllies.map((tile) => coordKey(tile)))}
         highlightKind={mode === 'shoot' ? 'shoot' : 'move'}
         fx={fx}
         onPick={pick}
@@ -581,8 +590,37 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx }: P
                 </span>
               )}
             </div>
+            {coveringAllies.length > 0 && (
+              <div className="support-pick">
+                <p className="muted small">Помощники рядом — отметьте, кто бьёт вместе (после удара они тоже выдыхаются):</p>
+                <div className="chips">
+                  {coveringAllies.map((tile) => {
+                    const key = coordKey(tile);
+                    const on = supportKeys.includes(key);
+                    const n = armyCount(tile.army);
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        className={`chip chip-pick${on ? ' selected' : ''}`}
+                        onClick={() => {
+                          haptic('light');
+                          setSupportKeys((cur) => (on ? cur.filter((k) => k !== key) : [...cur, key]));
+                        }}
+                      >
+                        {on ? '✓ ' : ''}
+                        {n} отр. ({tile.x},{tile.y})
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             {coveringCount > 0 && (
-              <p className="muted small">Соседний отряд ({coveringCount}) бьёт вместе, силы складываются.</p>
+              <p className="muted small">В ударе участвуют {coveringCount} соседних отр. — силы складываются.</p>
+            )}
+            {coveringAllies.length > 0 && coveringCount === 0 && (
+              <p className="muted small">Без помощников бьёт только выбранный отряд.</p>
             )}
             {fromTile &&
               targetTile &&
@@ -629,6 +667,10 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx }: P
             canBuildHere={canBuildHere}
             canAppointHere={canAppointHere}
             onStartMove={() => {
+              if (selectedTile.routedTurns > 0) {
+                notify('Отступающим отрядом нельзя управлять');
+                return;
+              }
               if (squarePinned(state, selectedTile)) {
                 notify('Каре не разойти, пока рядом вражеская конница');
                 return;
@@ -639,6 +681,7 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx }: P
               }
               setMoveFrom({ x: selectedTile.x, y: selectedTile.y });
               setMoveUnit(null);
+              setSupportKeys([]);
               setMode('move');
               const { min, max } = wingMoveRange(selectedTile);
               notify(
@@ -866,7 +909,7 @@ function TileDetails({
   const marched = tileHasMarched(tile, era, tile.commander ? COMMANDERS[tile.commander].speedBonus : 0);
   const heavyGunMoved = marched && armyHasHeavyArtillery(tile.army, era);
   const canShoot = tile.routedTurns < 1 && tile.shotsLeft > 0 && !heavyGunMoved;
-  const canMarch = mobileCount(ensureWings(tile)) > 0 && !pinned;
+  const canMarch = tile.routedTurns < 1 && mobileCount(ensureWings(tile)) > 0 && !pinned;
   const { min: minMp, max: maxMp } = wingMoveRange(tile);
   const canSquare = era === 'napoleonic' && isMine && isMyTurn && canFormSquare(tile) && !tile.square;
 
@@ -962,7 +1005,9 @@ function TileDetails({
               <span className="action-icon">🚶</span>
               <span className="action-label">Ход</span>
               <span className="action-sub">
-                {!canMarch
+                {tile.routedTurns > 0
+                  ? 'в бегстве'
+                  : !canMarch
                   ? pinned
                     ? 'каре держит строй'
                     : 'уже ходили'
@@ -984,7 +1029,7 @@ function TileDetails({
               <span className="action-label">{eraInfo.volleyLabel}</span>
               <span className="action-sub">
                 {tile.routedTurns > 0
-                  ? 'в панике'
+                  ? 'в бегстве'
                   : heavyGunMoved
                     ? 'после хода нельзя'
                     : tile.shotsLeft < 1

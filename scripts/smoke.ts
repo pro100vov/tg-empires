@@ -206,6 +206,7 @@ function checkJointAttack(): void {
     from: { x: striker.x, y: striker.y },
     to: { x: target.x, y: target.y },
     count: 1,
+    supportFrom: [{ x: ally.x, y: ally.y }],
   });
   assert.ok(result.ok);
   assert.equal(result.ok && result.fx?.battle, 'won', 'два отряда вместе берут цель, которую один не взял бы');
@@ -213,6 +214,8 @@ function checkJointAttack(): void {
   assert.ok(armyCount(target.army) >= 1, 'на захваченной клетке остаётся ударный отряд');
   assert.equal(ally.ownerId, me.id, 'второй отряд остаётся на своей клетке');
   assert.ok(armyCount(ally.army) > 0, 'второй отряд не телепортируется');
+  assert.equal(ally.movesLeft, 0, 'помощник после совместного удара больше не ходит');
+  assert.equal(ally.shotsLeft, 0, 'помощник после совместного удара не стреляет');
   console.log('✓ совместный удар двух отрядов');
 }
 
