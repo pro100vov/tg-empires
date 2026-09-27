@@ -17,11 +17,14 @@ export const BASE_ACTIONS = 5;
 export const MAX_TECH_LEVEL = 5;
 export const MAX_LOGISTICS_LEVEL = 3;
 
-export const START_RESOURCES: Resources = { gold: 60, food: 40, iron: 20 };
+export const START_RESOURCES: Resources = { gold: 70, food: 40, iron: 25 };
 export const CAPITAL_START_ARMY = 6;
 
-/** Одна единица еды кормит два отряда за ход. */
-export const UPKEEP_UNITS_PER_FOOD = 2;
+/** Доход столицы сверх местности. */
+export const CAPITAL_INCOME: Resources = { gold: 5, food: 2, iron: 2 };
+
+/** Прибавка ко всем доходам за уровень техи «Экономика». */
+export const ECONOMY_TECH_BONUS = 0.15;
 
 /** Доля дезертиров, когда еды не хватило на содержание. */
 export const STARVATION_DESERTION = 0.15;
@@ -60,17 +63,17 @@ export interface BuildingInfo {
 export const BUILDINGS: Record<BuildingType, BuildingInfo> = {
   farm: {
     name: 'Ферма',
-    cost: { gold: 20 },
-    income: { food: 2 },
+    cost: { gold: 15 },
+    income: { food: 3 },
     defenseBonus: 0,
     allowsRecruit: false,
     buildTurns: 1,
     icon: '🌾',
-    description: '+2 еды в ход',
+    description: '+3 еды в ход',
   },
   mine: {
     name: 'Шахта',
-    cost: { gold: 25, iron: 5 },
+    cost: { gold: 25 },
     income: { iron: 2 },
     defenseBonus: 0,
     allowsRecruit: false,
@@ -80,13 +83,13 @@ export const BUILDINGS: Record<BuildingType, BuildingInfo> = {
   },
   market: {
     name: 'Рынок',
-    cost: { gold: 30 },
-    income: { gold: 3 },
+    cost: { gold: 30, food: 10 },
+    income: { gold: 4 },
     defenseBonus: 0,
     allowsRecruit: false,
     buildTurns: 2,
     icon: '🏛️',
-    description: '+3 золота в ход',
+    description: '+4 золота в ход',
   },
   palisade: {
     name: 'Частокол',
@@ -130,12 +133,12 @@ export interface TechInfo {
 export const TECHS: Record<TechType, TechInfo> = {
   attack: { name: 'Военное дело', icon: '🗡️', maxLevel: MAX_TECH_LEVEL, description: '+12% к силе атаки за уровень' },
   defense: { name: 'Фортификация', icon: '🛡️', maxLevel: MAX_TECH_LEVEL, description: '+12% к силе обороны за уровень' },
-  economy: { name: 'Экономика', icon: '📈', maxLevel: MAX_TECH_LEVEL, description: '+10% ко всем доходам за уровень' },
+  economy: { name: 'Экономика', icon: '📈', maxLevel: MAX_TECH_LEVEL, description: '+15% ко всем доходам за уровень' },
   logistics: { name: 'Логистика', icon: '🐎', maxLevel: MAX_LOGISTICS_LEVEL, description: '+1 действие в ход за уровень' },
 };
 
 export function techCost(level: number): Resources {
-  return { gold: 40 * (level + 1), food: 0, iron: 20 * (level + 1) };
+  return { gold: 30 * (level + 1), food: 10 * (level + 1), iron: 12 * (level + 1) };
 }
 
 export function defaultGameSettings(): GameSettings {

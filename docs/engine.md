@@ -32,7 +32,7 @@
 | 295-332 | `sanitizeSettings` — границы: карта 8-14, раунды 15-60, золото 20-200, еда/железо 0-150, армия 2-20, действия 3-8. `hotseat` сюда **не входит** — его выставляет только `setupHotseat`, иначе через `configure` можно было включить «сам с собой» в обычной комнате или выключить в соло |
 | 335-390 | `applyLobbyAction` — `setAdmin` (только хост), `reroll`, `paint` (рисование рельефа, переключает в custom), `configure` |
 | 392-437 | `startGame` — генерация/ресайз карты, столицы с фортом и стартовой армией, случайный порядок ходов, `beginTurn` |
-| 439-475 | Экономика: `computeIncome` (местность + постройки + столица +3🪙+2🌾+1🔩, ×(1+0.1·economy)), `totalArmy`, `upkeepFor` |
+| 439-475 | Экономика: `computeIncome` (местность + постройки + столица `CAPITAL_INCOME` +5🪙+2🌾+2🔩, ×(1+0.15·economy)), `totalArmy`, `upkeepFor` (сумма `UNITS[id].upkeep` по отрядам, вверх) |
 | 477-480 | `log` — журнал, максимум 100 записей |
 | 482-559 | `beginTurn` — стройки −1, доход, содержание/голод, сброс `wings` (routed → 0 хода), действия, удержание каре (1⚡ за каре) |
 | 561-590 | `nextTurn` — уменьшение паники, проверка победы, следующий живой игрок, новый раунд / конец по очкам |
@@ -60,7 +60,7 @@
 |---|---|---|
 | `squareReply` | 992 | в обход проверки «чей ход» |
 | `endTurn` | 1000 | `nextTurn` |
-| `research` | 1005 | 1⚡, `Object.hasOwn(techs, action.tech)`, цена `techCost(level)` = 40·(ур+1)🪙 + 20·(ур+1)🔩 |
+| `research` | 1005 | 1⚡, `Object.hasOwn(techs, action.tech)`, цена `techCost(level)` = 30·(ур+1)🪙 + 10·(ур+1)🌾 + 12·(ур+1)🔩 |
 | `build` | 1021 | 1⚡, `Object.hasOwn(buildings, action.building)`, своя клетка без постройки → `construction` на `buildTurns` ходов |
 | `recruit` | 1042 | 1⚡, только в столице или казармах; `Object.hasOwn(units, action.unit)`; новое «крыло» с полным ходом |
 | `appoint` | 1067 | 1⚡, `Object.hasOwn(commanders, action.commander)`; командир на стек в столице/казармах; +ход неходившим крыльям |
@@ -111,8 +111,8 @@
 
 ## config.ts — баланс
 `MAX_PLAYERS=4`, `MIN_PLAYERS=2`, `MAX_ROUNDS=30`, `MAP_SIZES`, `ROUND_OPTIONS`, `ACTION_OPTIONS`, размеры гекса `:12-15`,
-`BASE_ACTIONS=5`, `START_RESOURCES`, `CAPITAL_START_ARMY=6`, `UPKEEP_UNITS_PER_FOOD=2`, `STARVATION_DESERTION=0.15`,
-`TERRAIN` `:40`, `BUILDINGS` `:60` (farm, mine, market, palisade, fort, barracks), `TECHS` `:130`, `techCost` `:137`,
+`BASE_ACTIONS=5`, `START_RESOURCES`, `CAPITAL_START_ARMY=6`, `CAPITAL_INCOME`, `ECONOMY_TECH_BONUS=0.15`, `STARVATION_DESERTION=0.15`,
+`TERRAIN` `:46`, `BUILDINGS` `:66` (farm, mine, market, palisade, fort, barracks), `TECHS` `:136`, `techCost` `:143`,
 `defaultGameSettings` `:141`, `PLAYER_COLORS` `:157`.
 
 ## map.ts — гекс-сетка

@@ -224,7 +224,7 @@ export default function Lobby({ state, me, onCreate, onSolo, onJoin, onStart, on
                   Рисовать
                 </button>
                 <button type="button" className="choice" onClick={() => send({ type: 'reroll' })}>
-                  Перебросить
+                  Новая карта
                 </button>
               </div>
             </div>

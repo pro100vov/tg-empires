@@ -36,7 +36,7 @@ export default function TechModal({ player, isMyTurn, actionsLeft, era, onResear
                 disabled={maxed || !affordable || !isMyTurn || actionsLeft < 1}
                 onClick={() => onResearch(key)}
               >
-                {maxed ? 'макс.' : `🪙${cost.gold} 🔩${cost.iron}`}
+                {maxed ? 'макс.' : `🪙${cost.gold} 🌾${cost.food} 🔩${cost.iron}`}
               </button>
             </div>
           );

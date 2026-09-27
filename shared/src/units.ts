@@ -32,6 +32,8 @@ export interface UnitInfo {
   /** Конные лучники: ход как у конницы, залп как у лучников. */
   mounted: boolean;
   cost: Resources;
+  /** Еды в ход на отряд: конница ест больше пехоты. */
+  upkeep: number;
   description: string;
   /** Подпись в сетке найма. */
   short: string;
@@ -67,6 +69,7 @@ export const UNITS: Record<UnitId, UnitInfo> = {
     charge: false,
     mounted: false,
     cost: { gold: 5, food: 0, iron: 2 },
+    upkeep: 1,
     description: 'Дешёвый строй, слабо держит удар',
     short: 'Лёгк. пех.',
     range: 0,
@@ -83,6 +86,7 @@ export const UNITS: Record<UnitId, UnitInfo> = {
     charge: false,
     mounted: false,
     cost: { gold: 8, food: 0, iron: 4 },
+    upkeep: 1.2,
     description: 'Сильна против конницы, в лесу держится лучше коней',
     short: 'Средн. пех.',
     range: 0,
@@ -99,6 +103,7 @@ export const UNITS: Record<UnitId, UnitInfo> = {
     charge: false,
     mounted: false,
     cost: { gold: 14, food: 0, iron: 8 },
+    upkeep: 1.6,
     description: 'Щит державы, ход 1, бьёт только в упор',
     short: 'Тяж. пех.',
     range: 0,
@@ -115,6 +120,7 @@ export const UNITS: Record<UnitId, UnitInfo> = {
     charge: true,
     mounted: false,
     cost: { gold: 7, food: 0, iron: 3 },
+    upkeep: 2,
     description: 'Ход 3, набег с 2 гексов, лес −2 кл.',
     short: 'Лёгк. кон.',
     range: 0,
@@ -131,6 +137,7 @@ export const UNITS: Record<UnitId, UnitInfo> = {
     charge: true,
     mounted: false,
     cost: { gold: 12, food: 0, iron: 5 },
+    upkeep: 2.4,
     description: 'Набег с 2 гексов, в лесу строй встаёт',
     short: 'Средн. кон.',
     range: 0,
@@ -147,6 +154,7 @@ export const UNITS: Record<UnitId, UnitInfo> = {
     charge: true,
     mounted: false,
     cost: { gold: 18, food: 0, iron: 9 },
+    upkeep: 3,
     description: 'Таран с набегу, лес стоп, холмы −2 кл.',
     short: 'Тяж. кон.',
     range: 0,
@@ -163,6 +171,7 @@ export const UNITS: Record<UnitId, UnitInfo> = {
     charge: false,
     mounted: false,
     cost: { gold: 6, food: 0, iron: 3 },
+    upkeep: 1,
     description: 'Ход 2 гекса, залп в лес слаб',
     short: 'Лёгк. луч.',
     range: 2,
@@ -179,6 +188,7 @@ export const UNITS: Record<UnitId, UnitInfo> = {
     charge: false,
     mounted: false,
     cost: { gold: 10, food: 0, iron: 4 },
+    upkeep: 1.2,
     description: 'Залп на 2, в чащу бьют слабо',
     short: 'Средн. луч.',
     range: 2,
@@ -195,6 +205,7 @@ export const UNITS: Record<UnitId, UnitInfo> = {
     charge: false,
     mounted: false,
     cost: { gold: 16, food: 0, iron: 7 },
+    upkeep: 1.6,
     description: 'Мощный залп с холмов, в лес слабо',
     short: 'Тяж. луч.',
     range: 2,
@@ -211,6 +222,7 @@ export const UNITS: Record<UnitId, UnitInfo> = {
     charge: false,
     mounted: true,
     cost: { gold: 9, food: 0, iron: 4 },
+    upkeep: 2,
     description: 'Ход 3, залп, лес −2 кл. но не стоп, после выстрела могут отойти',
     short: 'Лёгк. кон.луч.',
     range: 2,
@@ -227,6 +239,7 @@ export const UNITS: Record<UnitId, UnitInfo> = {
     charge: false,
     mounted: true,
     cost: { gold: 14, food: 0, iron: 6 },
+    upkeep: 2.4,
     description: 'Ход 3, залп, в лесу стоп, после выстрела могут отойти',
     short: 'Кон. луч.',
     range: 2,
@@ -243,6 +256,7 @@ export const UNITS: Record<UnitId, UnitInfo> = {
     charge: false,
     mounted: true,
     cost: { gold: 20, food: 0, iron: 8 },
+    upkeep: 2.8,
     description: 'Ход 2, залп с коня, лес стоп, холмы −2 кл.',
     short: 'Тяж. кон.луч.',
     range: 2,

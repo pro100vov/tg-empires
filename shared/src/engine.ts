@@ -7,7 +7,8 @@ import {
   START_RESOURCES,
   STARVATION_DESERTION,
   TERRAIN,
-  UPKEEP_UNITS_PER_FOOD,
+  CAPITAL_INCOME,
+  ECONOMY_TECH_BONUS,
   techCost,
 } from './config.js';
 import {
@@ -456,12 +457,12 @@ export function computeIncome(state: GameState, playerId: string): Resources {
       income.iron += b.iron ?? 0;
     }
     if (tile.capitalOf === playerId) {
-      income.gold += 3;
-      income.food += 2;
-      income.iron += 1;
+      income.gold += CAPITAL_INCOME.gold;
+      income.food += CAPITAL_INCOME.food;
+      income.iron += CAPITAL_INCOME.iron;
     }
   }
-  const mult = 1 + 0.1 * player.tech.economy;
+  const mult = 1 + ECONOMY_TECH_BONUS * player.tech.economy;
   return {
     gold: Math.round(income.gold * mult),
     food: Math.round(income.food * mult),
@@ -474,7 +475,13 @@ export function totalArmy(state: GameState, playerId: string): number {
 }
 
 export function upkeepFor(state: GameState, playerId: string): number {
-  return Math.ceil(totalArmy(state, playerId) / UPKEEP_UNITS_PER_FOOD);
+  const units = unitsOf(state);
+  let food = 0;
+  for (const tile of state.tiles) {
+    if (tile.ownerId !== playerId) continue;
+    for (const [id, n] of Object.entries(tile.army)) food += (n ?? 0) * (units[id as UnitId]?.upkeep ?? 1);
+  }
+  return Math.ceil(food - 1e-9);
 }
 
 function log(state: GameState, text: string): void {

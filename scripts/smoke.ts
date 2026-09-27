@@ -267,7 +267,10 @@ function checkStarvation(): void {
   capital.army = { medium_infantry: 100 };
   me.resources.food = 0;
   const upkeep = upkeepFor(state, me.id);
-  assert.equal(upkeep, 50, 'содержание — одна еда на два отряда');
+  assert.equal(upkeep, 120, 'средняя пехота ест 1.2 еды за отряд');
+  capital.army = { heavy_cavalry: 10, light_infantry: 10 };
+  assert.equal(upkeepFor(state, me.id), 40, 'конница ест больше пехоты');
+  capital.army = { medium_infantry: 100 };
 
   // Прокручиваем круг, чтобы у игрока начался новый ход с недостатком еды.
   applyAction(state, me.id, { type: 'endTurn' });

@@ -1159,6 +1159,7 @@ function RecruitSheet({
                   🪙{info.cost.gold}
                   {info.cost.iron ? ` 🔩${info.cost.iron}` : ''}
                 </span>
+                <span className="unit-pick-cost muted">🌾{info.upkeep}/ход</span>
               </button>
             );
           })}

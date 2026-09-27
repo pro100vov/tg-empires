@@ -72,7 +72,7 @@ scripts/abuse.ts        кривые payload'ы против локальног�
 |---|---|
 | Главный обработчик действий | `applyAction` `:1002` (switch по `action.type`) |
 | Конец хода | `case 'endTurn'` `:1012` → `nextTurn` `:564` |
-| Изучение технологии | `case 'research'` `:1017`; стоимость `config.ts:137 techCost` |
+| Изучение технологии | `case 'research'` `:1017`; стоимость `config.ts:143 techCost` |
 | Постройка | `case 'build'` `:1033`; данные `config.ts:60 BUILDINGS` |
 | Найм войск | `case 'recruit'` `:1054` |
 | Назначение командира | `case 'appoint'` `:1079` |
@@ -105,7 +105,7 @@ scripts/abuse.ts        кривые payload'ы против локальног�
 | Стоимость хода по местности, остановка коней в лесу | `units.ts:548-598` |
 | Дальность стрельбы, артиллерия | `units.ts:600-668` |
 | «Крылья» (группы с разным запасом хода) | `units.ts:700-828` |
-| Местность (доход, защита, укрытие) | `shared/src/config.ts:40 TERRAIN` |
+| Местность (доход, защита, укрытие) | `shared/src/config.ts:46 TERRAIN` |
 | Постройки | `shared/src/config.ts:60 BUILDINGS` |
 | Технологии | `shared/src/config.ts:130 TECHS` |
 | Стартовые ресурсы/армия, действий за ход, лимиты | `shared/src/config.ts:3-27`, `defaultGameSettings` `:141` |

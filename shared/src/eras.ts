@@ -373,13 +373,13 @@ const ERA_TECHS: Record<EraId, Partial<Record<TechType, TechFlavor>>> = {
   medieval: {
     attack: { name: 'Ратное дело', icon: '⚔️', description: '+12% к силе атаки за уровень' },
     defense: { name: 'Замки', icon: '🏰', description: '+12% к силе обороны за уровень' },
-    economy: { name: 'Казна', icon: '💰', description: '+10% ко всем доходам за уровень' },
+    economy: { name: 'Казна', icon: '💰', description: '+15% ко всем доходам за уровень' },
     logistics: { name: 'Поход', icon: '🐎', description: '+1 действие в ход за уровень' },
   },
   napoleonic: {
     attack: { name: 'Тактика', icon: '🎖️', description: '+12% к силе атаки за уровень' },
     defense: { name: 'Инженерия', icon: '🧱', description: '+12% к силе обороны за уровень' },
-    economy: { name: 'Интендантство', icon: '📦', description: '+10% ко всем доходам за уровень' },
+    economy: { name: 'Интендантство', icon: '📦', description: '+15% ко всем доходам за уровень' },
     logistics: { name: 'Марши', icon: '🥁', description: '+1 действие в ход за уровень' },
   },
 };
