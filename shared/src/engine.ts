@@ -22,6 +22,7 @@ import {
   walkPath,
 } from './map.js';
 import { mulberry32 } from './rng.js';
+import { canSeeArmyOn, canWatchTile } from './vision.js';
 import { COMMANDERS } from './commanders.js';
 import { ERAS, buildingsFor, commandersFor, eraOf, isEraId, techsFor } from './eras.js';
 import type {
@@ -251,7 +252,15 @@ export function addPlayer(state: GameState, id: string, name: string): ActionRes
     connected: true,
     seenBuildings: {},
   });
+  if (!state.hostId) state.hostId = id;
   return { ok: true, events: [`${name} присоединился к игре`] };
+}
+
+/** Игрок временно ушёл (перезагрузка, разрыв связи) — место и права не отнимаем. */
+export function markDisconnected(state: GameState, id: string): void {
+  if (isHotseatRival(id)) return;
+  const player = playerById(state, id);
+  if (player) player.connected = false;
 }
 
 export function removePlayer(state: GameState, id: string): void {
@@ -266,7 +275,8 @@ export function removePlayer(state: GameState, id: string): void {
     state.players.forEach((p, i) => {
       p.color = PLAYER_COLORS[i % PLAYER_COLORS.length]!;
     });
-    if (state.hostId === id && state.players[0]) state.hostId = state.players[0].id;
+    // Ушли все — хоста нет, им станет следующий вошедший (см. addPlayer).
+    if (state.hostId === id) state.hostId = state.players[0]?.id ?? '';
     state.adminIds = state.adminIds.filter((adminId) => adminId !== id && state.players.some((p) => p.id === adminId));
     return;
   }
@@ -293,7 +303,8 @@ function sanitizeSettings(patch: Partial<GameSettings>): Partial<GameSettings> {
   }
   if (patch.terrainMode === 'random' || patch.terrainMode === 'custom') next.terrainMode = patch.terrainMode;
   if (typeof patch.fogOfWar === 'boolean') next.fogOfWar = patch.fogOfWar;
-  if (typeof patch.hotseat === 'boolean') next.hotseat = patch.hotseat;
+  // hotseat выставляет только setupHotseat — через лобби его менять нельзя (иначе хост
+  // может подменить режим и ходить за всех, либо сломать соло-партию).
   if (isEraId(patch.era)) next.era = patch.era;
   if (patch.maxRounds != null) {
     const rounds = clampInt(patch.maxRounds, 15, 60);
@@ -620,11 +631,8 @@ function eliminate(state: GameState, victimId: string, conquerorId: string): voi
   for (const tile of state.tiles) {
     if (tile.ownerId !== victimId) continue;
     tile.ownerId = conquerorId;
-    tile.army = {};
     tile.construction = null;
-    writeWings(tile, []);
-    tile.commander = null;
-    tile.routedTurns = 0;
+    clearMarch(tile);
     if (tile.capitalOf === victimId) tile.capitalOf = null;
   }
   log(state, `Держава ${victim.name} пала под натиском ${conqueror?.name ?? 'врага'}.`);
@@ -932,6 +940,7 @@ export function battleForecastRatio(
   defender: Player | undefined,
   charging = false,
   support: Army = {},
+  atkCommander: CommanderId | null = null,
 ): number {
   const eraId = era(state);
   const square = Boolean(tile.square);
@@ -941,10 +950,13 @@ export function battleForecastRatio(
   const strike =
     armyPower(attacking, 'attack', vsDef, tile.terrain, { era: eraId, square }) * (chargingEff ? CHARGE_ATTACK : 1) +
     armyPower(support, 'attack', vsDef, tile.terrain, { era: eraId, square });
-  const attackPower = strike * attackMultiplier(attacker);
+  // Те же множители, что в resolveBattle, только без случайного разброса.
+  const attackPower = strike * attackMultiplier(attacker) * commanderBonus(atkCommander, 'attack');
   const defensePower =
     armyPower(tile.army, 'defense', dominantClass(combined), tile.terrain, { era: eraId, square }) *
-    defenseMultiplier(state, tile, defender);
+    defenseMultiplier(state, tile, defender) *
+    commanderBonus(tile.commander, 'defense') *
+    (tile.routedTurns > 0 ? 0.65 : 1);
   return attackPower / Math.max(defensePower, 0.001);
 }
 
@@ -965,8 +977,9 @@ function applySquareReply(state: GameState, userId: string, form: boolean): Acti
   }
   state.pendingSquare = null;
   resolvingSquareOffer = true;
+  let result: ActionResult;
   try {
-    return applyAction(state, pending.attackerId, {
+    result = applyAction(state, pending.attackerId, {
       type: 'move',
       from: pending.from,
       to: pending.to,
@@ -977,6 +990,13 @@ function applySquareReply(state: GameState, userId: string, form: boolean): Acti
   } finally {
     resolvingSquareOffer = false;
   }
+  // Ответ обороны уже изменил состояние (каре снято с ожидания) — его нужно разослать,
+  // даже если атака не состоялась, иначе атакующий застрянет в окне «оборона решает».
+  if (!result.ok) {
+    log(state, `Атака отменена: ${result.error}.`);
+    return { ok: true, events: [] };
+  }
+  return result;
 }
 
 export function applyAction(state: GameState, playerId: string, action: GameAction): ActionResult {
@@ -996,9 +1016,10 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
 
     case 'research': {
       if (player.actionsLeft < 1) return { ok: false, error: 'Действия на ход закончились' };
+      const techs = techsFor(era(state));
+      if (!Object.hasOwn(techs, action.tech)) return { ok: false, error: 'Неизвестная технология' };
       const level = player.tech[action.tech];
-      const info = techsFor(era(state))[action.tech];
-      if (!info) return { ok: false, error: 'Неизвестная технология' };
+      const info = techs[action.tech];
       if (level >= info.maxLevel) return { ok: false, error: 'Максимальный уровень' };
       const cost = techCost(level);
       if (!canAfford(player.resources, cost)) return { ok: false, error: 'Не хватает ресурсов' };
@@ -1016,8 +1037,9 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       if (tile.ownerId !== playerId) return { ok: false, error: 'Клетка не ваша' };
       if (tile.building) return { ok: false, error: 'Здесь уже есть постройка' };
       if (tile.construction) return { ok: false, error: 'Здесь уже идёт стройка' };
-      const info = buildingsOf(state)[action.building];
-      if (!info) return { ok: false, error: 'Неизвестная постройка' };
+      const buildings = buildingsOf(state);
+      if (!Object.hasOwn(buildings, action.building)) return { ok: false, error: 'Неизвестная постройка' };
+      const info = buildings[action.building];
       if (!canAfford(player.resources, info.cost)) return { ok: false, error: 'Не хватает ресурсов' };
       pay(player.resources, info.cost);
       tile.construction = { building: action.building, turnsLeft: info.buildTurns };
@@ -1040,7 +1062,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       const count = Math.floor(action.count);
       if (count < 1) return { ok: false, error: 'Некорректное число отрядов' };
       const units = unitsOf(state);
-      const unit: UnitId = action.unit && units[action.unit] ? action.unit : DEFAULT_UNIT;
+      const unit: UnitId = action.unit && Object.hasOwn(units, action.unit) ? action.unit : DEFAULT_UNIT;
       const cost = multiplyCost(units[unit].cost, count);
       if (!canAfford(player.resources, cost)) return { ok: false, error: 'Не хватает ресурсов' };
       pay(player.resources, cost);
@@ -1065,8 +1087,9 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       if (armyCount(tile.army) < 1) return { ok: false, error: 'Нужны войска на клетке' };
       if (tile.routedTurns > 0) return { ok: false, error: 'Отступающим отрядом нельзя управлять' };
       if (tile.commander) return { ok: false, error: 'У этого стека уже есть командир' };
-      const info = commandersOf(state)[action.commander];
-      if (!info) return { ok: false, error: 'Неизвестный командир' };
+      const commanders = commandersOf(state);
+      if (!Object.hasOwn(commanders, action.commander)) return { ok: false, error: 'Неизвестный командир' };
+      const info = commanders[action.commander];
       if (!canAfford(player.resources, info.cost)) return { ok: false, error: 'Не хватает ресурсов' };
       pay(player.resources, info.cost);
       const unmovedWings = ensureWings(tile).map((wing) => {
@@ -1099,7 +1122,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       const dist = hexDistance(from, to);
       const enemyFight = to.ownerId !== playerId && armyCount(to.army) > 0;
       const count = Math.floor(action.count);
-      const only = action.unit && UNITS[action.unit] ? action.unit : undefined;
+      const only = action.unit && Object.hasOwn(UNITS, action.unit) ? action.unit : undefined;
       const fromWings = ensureWings(from);
       const wantCharge =
         dist === 2 &&
@@ -1124,6 +1147,12 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       if (!supportPick.ok) return supportPick;
       const allies = supportPick.tiles;
 
+      // Действие проверяем до предложения каре: иначе оборона ответит, а повтор хода не пройдёт.
+      const alreadyMarching = wingsAlreadyMarching(takenWings, speedBonus(from), era(state));
+      if (!alreadyMarching && player.actionsLeft < 1) {
+        return { ok: false, error: 'Действия на ход закончились' };
+      }
+
       if (!resolvingSquareOffer && enemyFight && shouldOfferSquare(state, taken, to)) {
         state.pendingSquare = {
           attackerId: playerId,
@@ -1139,11 +1168,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
         return { ok: true, events: ['square-offer'] };
       }
 
-      const alreadyMarching = wingsAlreadyMarching(takenWings, speedBonus(from), era(state));
-      if (!alreadyMarching) {
-        if (player.actionsLeft < 1) return { ok: false, error: 'Действия на ход закончились' };
-        player.actionsLeft -= 1;
-      }
+      if (!alreadyMarching) player.actionsLeft -= 1;
       const lead = dominantUnit(taken) ?? DEFAULT_UNIT;
       const events: string[] = [];
       const arrivingWings = takenWings.map((wing) =>
@@ -1354,6 +1379,10 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       if (dist < 1 || dist > range) return { ok: false, error: 'Цель вне дальности' };
       if (to.ownerId === playerId) return { ok: false, error: 'Нельзя стрелять по своим' };
       if (armyCount(to.army) < 1) return { ok: false, error: 'Некого обстреливать' };
+      // Клиент не подсвечивает скрытые туманом цели — сервер тоже не даёт стрелять вслепую.
+      if (!canWatchTile(state, playerId, to) || !canSeeArmyOn(state, playerId, to)) {
+        return { ok: false, error: 'Цель не видна' };
+      }
 
       const defender = to.ownerId ? playerById(state, to.ownerId) : undefined;
       const jitter = () => 0.85 + nextRandom(state) * 0.3;
@@ -1402,9 +1431,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       }
 
       if (losses >= defCount) {
-        writeWings(to, []);
-        to.commander = null;
-        to.routedTurns = 0;
+        clearMarch(to);
         log(state, `${flavorOf(state).volleyLabel} ${player.name} уничтожает гарнизон.`);
         return { ok: true, events: ['volley-wipe'], fx: { ...fxBase, battle: 'won' } };
       }
@@ -1482,11 +1509,31 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
   }
 }
 
+/**
+ * Есть ли у игрока клетка, которая может бесплатно продолжить уже начатый поход
+ * (move не тратит действие для крыла, которое уже маршировало, — см. wingsAlreadyMarching).
+ * Пока такая клетка есть, автоконец хода откладываем: иначе поход обрывается зря.
+ */
+function hasFreeContinuingMarch(state: GameState, playerId: string): boolean {
+  for (const tile of state.tiles) {
+    if (tile.ownerId !== playerId) continue;
+    if (tile.routedTurns > 0) continue;
+    if (squarePinned(state, tile)) continue;
+    const bonus = speedBonus(tile);
+    for (const wing of ensureWings(tile)) {
+      if (wingsAlreadyMarching([wing], bonus, era(state))) return true;
+    }
+  }
+  return false;
+}
+
 /** Действия закончились — ход завершается автоматически. */
 export function autoEndTurnIfExhausted(state: GameState): void {
   if (state.pendingSquare) return;
   const player = currentPlayer(state);
-  if (state.phase === 'playing' && player && player.actionsLeft <= 0) nextTurn(state);
+  if (state.phase !== 'playing' || !player || player.actionsLeft > 0) return;
+  if (hasFreeContinuingMarch(state, player.id)) return;
+  nextTurn(state);
 }
 
 export function coordKey(c: Coord): string {

@@ -24,6 +24,7 @@ interface Props {
   onJoin: (code: string) => void;
   onStart: () => void;
   onLobby: (action: LobbyAction) => void;
+  onExit: () => void;
 }
 
 const BRUSHES: TerrainType[] = ['plains', 'forest', 'hills', 'mountains', 'water'];
@@ -35,7 +36,7 @@ const BRUSH_ICON: Record<TerrainType, string> = {
   water: '🌊',
 };
 
-export default function Lobby({ state, me, onCreate, onSolo, onJoin, onStart, onLobby }: Props) {
+export default function Lobby({ state, me, onCreate, onSolo, onJoin, onStart, onLobby, onExit }: Props) {
   const [code, setCode] = useState('');
   const [copied, setCopied] = useState(false);
   const [brush, setBrush] = useState<TerrainType>('forest');
@@ -367,6 +368,10 @@ export default function Lobby({ state, me, onCreate, onSolo, onJoin, onStart, on
           }}
         >
           {copied ? 'Код скопирован' : `Скопировать код ${state.roomCode}`}
+        </button>
+
+        <button className="btn" onClick={onExit}>
+          Выйти в меню
         </button>
 
         {isHost ? (

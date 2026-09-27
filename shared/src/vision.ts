@@ -144,9 +144,21 @@ export function maskStateFor(state: GameState, viewerId: string): GameState {
     ...state,
     tiles: state.tiles.map((tile) => maskTile(state, viewerId, tile)),
     players: state.players.map((player) =>
-      player.id === viewerId ? player : { ...player, seenBuildings: {} },
+      player.id === viewerId
+        ? player
+        : { ...player, seenBuildings: {}, resources: { gold: 0, food: 0, iron: 0 } },
     ),
   };
+}
+
+/**
+ * Итоговый вид состояния для конкретного игрока: маскирует туман войны и
+ * скрывает seed — от него детерминированно зависят все будущие броски боя,
+ * знать его заранее клиент не должен.
+ */
+export function publicView(state: GameState, viewerId: string): GameState {
+  const view = maskStateFor(state, viewerId);
+  return state.phase === 'finished' ? view : { ...view, seed: 0 };
 }
 
 export function maskFxFor(state: GameState, viewerId: string, fx: GameFx | undefined): GameFx | undefined {

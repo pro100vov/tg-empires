@@ -26,6 +26,11 @@ export function getRoom(code: string): GameState | undefined {
   return room.state;
 }
 
+/** Для уборщика в index.ts — без обновления updatedAt (в отличие от getRoom). */
+export function listRooms(): GameState[] {
+  return [...rooms.values()].map((room) => room.state);
+}
+
 export function touchRoom(code: string): void {
   const room = rooms.get(code.toUpperCase());
   if (room) room.updatedAt = Date.now();

@@ -5,7 +5,9 @@ export interface AuthUser {
   name: string;
 }
 
-const MAX_AUTH_AGE_SECONDS = 24 * 60 * 60;
+// initData снимается один раз при открытии Mini App и не обновляется (client/src/net.ts);
+// сутки слишком мало — при обрыве связи переподключиться станет нельзя.
+const MAX_AUTH_AGE_SECONDS = 7 * 24 * 60 * 60;
 
 /**
  * Проверка подписи initData по алгоритму Telegram: секрет — HMAC от токена бота

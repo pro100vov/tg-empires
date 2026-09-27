@@ -4,12 +4,13 @@ import type { EraId, Player, TechType } from '@tge/shared';
 interface Props {
   player: Player;
   isMyTurn: boolean;
+  actionsLeft: number;
   era: EraId;
   onResearch: (tech: TechType) => void;
   onClose: () => void;
 }
 
-export default function TechModal({ player, isMyTurn, era, onResearch, onClose }: Props) {
+export default function TechModal({ player, isMyTurn, actionsLeft, era, onResearch, onClose }: Props) {
   const catalog = techsFor(era);
   return (
     <div className="overlay" onClick={onClose}>
@@ -32,7 +33,7 @@ export default function TechModal({ player, isMyTurn, era, onResearch, onClose }
               </div>
               <button
                 className="btn small"
-                disabled={maxed || !affordable || !isMyTurn}
+                disabled={maxed || !affordable || !isMyTurn || actionsLeft < 1}
                 onClick={() => onResearch(key)}
               >
                 {maxed ? 'макс.' : `🪙${cost.gold} 🔩${cost.iron}`}

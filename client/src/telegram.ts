@@ -53,10 +53,19 @@ export function devId(): string {
   // sessionStorage, а не localStorage: иначе две вкладки одного браузера
   // считались бы одним и тем же игроком, и партия не набирала бы состав.
   const key = 'tge-dev-id';
-  let id = sessionStorage.getItem(key);
+  let id: string | null = null;
+  try {
+    id = sessionStorage.getItem(key);
+  } catch {
+    // Хранилище закрыто (некоторые WebView) — просто без запоминания.
+  }
   if (!id) {
     id = `dev-${Math.floor(Math.random() * 100000)}`;
-    sessionStorage.setItem(key, id);
+    try {
+      sessionStorage.setItem(key, id);
+    } catch {
+      // ignore
+    }
   }
   return id;
 }

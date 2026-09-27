@@ -7,3 +7,4 @@ export * from './rng.js';
 export * from './map.js';
 export * from './vision.js';
 export * from './engine.js';
+export * from './validate.js';

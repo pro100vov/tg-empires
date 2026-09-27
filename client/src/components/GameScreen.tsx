@@ -67,6 +67,7 @@ interface Props {
   act: (action: GameAction) => Promise<{ ok: boolean; fx?: GameFx; state?: GameState }>;
   notify: (message: string) => void;
   fx: GameFx | null;
+  onExit: () => void;
 }
 
 type Sheet = 'recruit' | 'build' | 'commander' | null;
@@ -243,7 +244,7 @@ function ArmyChips({ army, era }: { army: Army; era: EraId }) {
   );
 }
 
-export default function GameScreen({ state, meId, viewerId, act, notify, fx }: Props) {
+export default function GameScreen({ state, meId, viewerId, act, notify, fx, onExit }: Props) {
   const [selected, setSelected] = useState<Coord | null>(null);
   const [mode, setMode] = useState<PickMode>('none');
   const [moveFrom, setMoveFrom] = useState<Coord | null>(null);
@@ -266,6 +267,8 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx }: P
   const era = eraOf(state.settings);
   const units = unitsFor(era);
   const eraInfo = ERAS[era];
+  /** «Набег» / «Таран» / «Атака» — первое слово подписи эпохи, как в журнале движка. */
+  const chargeWord = eraInfo.chargeLabel.split(/\s+/)[0] ?? 'Набег';
 
   useEffect(() => {
     if (!isMyTurn) {
@@ -484,7 +487,9 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx }: P
       armyCanCharge(attacking) &&
       targetTile.terrain !== 'forest' &&
       chargePathOpen(state, fromTile, targetTile, meId);
-    return battleForecastRatio(state, me, attacking, targetTile, defender, charging, coveringSupport);
+    // Командир идёт в бой, только если со клетки уходит весь стек (как в движке).
+    const commander = armyCount(attacking) === armyCount(fromTile.army) ? fromTile.commander : null;
+    return battleForecastRatio(state, me, attacking, targetTile, defender, charging, coveringSupport, commander);
   })();
 
   if (!me) {
@@ -538,7 +543,7 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx }: P
           <div className="move-panel">
             <div className="panel-title">
               {chargeTarget
-                ? 'Набег · −2 кл. хода · 1⚡'
+                ? `${chargeWord} · −${CHARGE_COST} кл. хода · ${alreadyMarching ? 0 : 1}⚡`
                 : terrainHalt
                   ? `${TERRAIN[targetTile.terrain].name} · −${terrainCost} кл. · стоп`
                   : alreadyMarching
@@ -641,7 +646,7 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx }: P
             <div className="row">
               <button className="btn primary grow" onClick={confirmMove}>
                 {chargeTarget
-                  ? 'Набег'
+                  ? chargeWord
                   : targetCount > 0 && targetTile.ownerId !== meId
                     ? coveringCount > 0
                       ? 'Бить вместе'
@@ -766,7 +771,7 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx }: P
           maxRecruit={maxRecruit}
           hire={hire}
           recruitCost={recruitCost}
-          disabled={!isMyTurn}
+          disabled={!isMyTurn || me.actionsLeft < 1}
           era={era}
           onRecruit={() => {
             void run({
@@ -787,7 +792,7 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx }: P
           era={era}
           gold={me.resources.gold}
           iron={me.resources.iron}
-          disabled={!isMyTurn}
+          disabled={!isMyTurn || me.actionsLeft < 1}
           onBuild={(building) => {
             void run({ type: 'build', at: { x: selectedTile.x, y: selectedTile.y }, building }).then((result) => {
               if (result.ok) setSheet(null);
@@ -802,7 +807,7 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx }: P
           era={era}
           gold={me.resources.gold}
           iron={me.resources.iron}
-          disabled={!isMyTurn}
+          disabled={!isMyTurn || me.actionsLeft < 1}
           onAppoint={(commander) => {
             void run({ type: 'appoint', at: { x: selectedTile.x, y: selectedTile.y }, commander }).then((result) => {
               if (result.ok) setSheet(null);
@@ -817,6 +822,7 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx }: P
           era={era}
           player={me}
           isMyTurn={isMyTurn}
+          actionsLeft={me.actionsLeft}
           onResearch={(tech) => run({ type: 'research', tech })}
           onClose={() => setShowTech(false)}
         />
@@ -852,9 +858,13 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx }: P
       {state.phase === 'finished' && (
         <div className="overlay center">
           <div className="overlay-card victory">
-            <div className="hero-icon">{state.winnerId === meId ? '👑' : '🏳️'}</div>
-            <h2>{state.winnerId === meId ? 'Победа!' : `Победил ${state.players.find((p) => p.id === state.winnerId)?.name ?? '—'}`}</h2>
+            {/* В соло meId — тот, чей был ход, поэтому «Победа!» там не показываем, только имя. */}
+            <div className="hero-icon">{!hotseat && state.winnerId === meId ? '👑' : '🏳️'}</div>
+            <h2>{!hotseat && state.winnerId === meId ? 'Победа!' : `Победил ${state.players.find((p) => p.id === state.winnerId)?.name ?? '—'}`}</h2>
             <p className="muted">Партия {state.roomCode} · раунд {state.round}</p>
+            <button className="btn primary" onClick={onExit}>
+              В меню
+            </button>
           </div>
         </div>
       )}
@@ -911,7 +921,9 @@ function TileDetails({
   const canShoot = tile.routedTurns < 1 && tile.shotsLeft > 0 && !heavyGunMoved;
   const canMarch = tile.routedTurns < 1 && mobileCount(ensureWings(tile)) > 0 && !pinned;
   const { min: minMp, max: maxMp } = wingMoveRange(tile);
-  const canSquare = era === 'napoleonic' && isMine && isMyTurn && canFormSquare(tile) && !tile.square;
+  const actionsLeft = state.players.find((p) => p.id === meId)?.actionsLeft ?? 0;
+  const canSquare =
+    era === 'napoleonic' && isMine && isMyTurn && actionsLeft > 0 && canFormSquare(tile) && !tile.square;
 
   return (
     <div>

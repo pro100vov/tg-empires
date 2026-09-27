@@ -59,7 +59,13 @@ import {
   walkPath,
   upkeepFor,
   ensureWings,
+  writeWings,
   VISION_BASE,
+  parseGameAction,
+  parseLobbyAction,
+  publicView,
+  markDisconnected,
+  removePlayer,
 } from '../shared/src/index.js';
 import type { GameState, Tile } from '../shared/src/index.js';
 
@@ -113,6 +119,40 @@ function checkActionLimit(): void {
   const late = applyAction(state, me.id, { type: 'recruit', at: capital, count: 1 });
   assert.equal(late.ok, false, 'чужой ход — действие отклонено');
   console.log('✓ лимит действий и переход хода');
+}
+
+/**
+ * move не тратит действие, если отряд уже в походе (wingsAlreadyMarching). Раньше
+ * autoEndTurnIfExhausted мог завершить ход сразу при 0 действий, не дав продолжить такой
+ * поход бесплатно. Теперь, пока есть клетка с «крылом» в пути, автоконец хода откладывается.
+ */
+function checkNoAutoEndDuringFreeMarch(): void {
+  const state = newGame();
+  const me = currentPlayer(state)!;
+  const capital = capitalOf(state, me.id);
+  capital.army = { light_cavalry: 5 };
+  writeWings(capital, [{ army: { light_cavalry: 5 }, movesLeft: 1, shotsLeft: 1 }]);
+  me.actionsLeft = 0;
+
+  autoEndTurnIfExhausted(state);
+  assert.equal(currentPlayer(state)!.id, me.id, 'ход не завершается, пока поход можно продолжить бесплатно');
+
+  const dest = neighbors(state, capital).find((t) => TERRAIN[t.terrain].passable && armyCount(t.army) === 0);
+  assert.ok(dest, 'нужна свободная соседняя клетка для завершения похода');
+  dest.terrain = 'plains';
+  const move = applyAction(state, me.id, {
+    type: 'move',
+    from: { x: capital.x, y: capital.y },
+    to: { x: dest.x, y: dest.y },
+    count: 5,
+  });
+  assert.ok(move.ok, 'бесплатное продолжение похода проходит');
+  assert.equal(me.actionsLeft, 0, 'бесплатное продолжение похода не тратит действие');
+  assert.equal(dest.movesLeft, 0, 'ход полностью исчерпан после продолжения');
+
+  autoEndTurnIfExhausted(state);
+  assert.notEqual(currentPlayer(state)!.id, me.id, 'когда поход исчерпан, ход завершается автоматически');
+  console.log('✓ автоконец хода ждёт бесплатное продолжение похода, пока оно возможно');
 }
 
 function checkBattleAndElimination(): void {
@@ -895,6 +935,37 @@ function checkVolley(): void {
   console.log('✓ залп лучников на 2 гекса; конные лучники могут отойти');
 }
 
+/** Уничтоженный залпом гарнизон не должен оставлять на клетке ложное «каре». */
+function checkVolleyWipeClearsSquare(): void {
+  const state = createGame('NAPVOLLEY', 'p1', 7);
+  addPlayer(state, 'p1', 'Первый');
+  addPlayer(state, 'p2', 'Второй');
+  assert.ok(applyLobbyAction(state, 'p1', { type: 'configure', settings: { era: 'napoleonic', fogOfWar: false } }).ok);
+  assert.ok(startGame(state, 'p1').ok);
+  const attacker = currentPlayer(state)!;
+  const defender = state.players.find((p) => p.id !== attacker.id)!;
+  const cap = capitalOf(state, defender.id);
+  const staging = state.tiles.find((t) => TERRAIN[t.terrain].passable && hexDistance(t, cap) === 2);
+  assert.ok(staging, 'нужна клетка на дальности 2 от вражеской столицы');
+  staging.ownerId = attacker.id;
+  staging.terrain = 'plains';
+  staging.army = { heavy_archer: 50 };
+  staging.movesLeft = 1;
+  staging.shotsLeft = 1;
+  cap.terrain = 'plains';
+  cap.army = { medium_infantry: 1 };
+  cap.square = true;
+  const result = applyAction(state, attacker.id, {
+    type: 'shoot',
+    from: { x: staging.x, y: staging.y },
+    to: { x: cap.x, y: cap.y },
+  });
+  assert.ok(result.ok, 'залп должен пройти');
+  assert.equal(armyCount(cap.army), 0, 'гарнизон уничтожен');
+  assert.equal(cap.square, false, 'после уничтожения залпом ложного каре не остаётся');
+  console.log('✓ уничтоженный залпом гарнизон не оставляет ложное каре');
+}
+
 function checkCasualtiesAndCommander(): void {
   const state = newGame();
   const attacker = currentPlayer(state)!;
@@ -1253,6 +1324,23 @@ function checkVision(): void {
   assert.equal(canSeeArmyOn(state, me.id, belt), false, 'за двумя лесами армии не видно');
   woods2.terrain = 'plains';
   assert.equal(hasLineOfSight(state, myCap, belt), true, 'один лес луч не глушит');
+
+  // Ресурсы соперника не должны утекать клиенту даже там, где армия видна.
+  enemy.resources = { gold: 111, food: 22, iron: 33 };
+  me.resources = { gold: 5, food: 6, iron: 7 };
+  const maskedRes = maskStateFor(state, me.id);
+  const maskedEnemy = maskedRes.players.find((p) => p.id === enemy.id)!;
+  const maskedMe = maskedRes.players.find((p) => p.id === me.id)!;
+  assert.deepEqual(maskedEnemy.resources, { gold: 0, food: 0, iron: 0 }, 'чужие ресурсы обнулены в маске');
+  assert.deepEqual(maskedMe.resources, { gold: 5, food: 6, iron: 7 }, 'свои ресурсы видны в маске');
+
+  // seed виден клиенту только после конца партии — иначе все броски боя предсказуемы заранее.
+  state.seed = 999;
+  assert.equal(publicView(state, me.id).seed, 0, 'seed скрыт, пока партия идёт');
+  state.phase = 'finished';
+  assert.equal(publicView(state, me.id).seed, 999, 'seed открывается после конца партии');
+  state.phase = 'playing';
+
   console.log('✓ туман войны: даль, лес и горы');
 }
 
@@ -1322,6 +1410,9 @@ function checkLobbySettings(): void {
   assert.equal(isLobbyAdmin(state, 'p1'), true);
   assert.equal(isLobbyAdmin(state, 'p2'), false);
 
+  assert.ok(applyLobbyAction(state, 'p1', { type: 'configure', settings: { hotseat: true } }).ok);
+  assert.equal(state.settings.hotseat, false, 'hotseat нельзя включить через настройки лобби');
+
   const denied = applyLobbyAction(state, 'p2', { type: 'configure', settings: { fogOfWar: false } });
   assert.equal(denied.ok, false, 'гость не меняет настройки');
 
@@ -1366,11 +1457,29 @@ function checkLobbySettings(): void {
   console.log('✓ лобби: размер карты, рельеф, туман, админ');
 }
 
+function checkMarkDisconnected(): void {
+  const state = createGame('DISC1', 'p1', 3);
+  addPlayer(state, 'p1', 'Хост');
+  addPlayer(state, 'p2', 'Гость');
+  markDisconnected(state, 'p2');
+  assert.equal(state.players.length, 2, 'markDisconnected не удаляет игрока из лобби');
+  assert.equal(state.hostId, 'p1', 'markDisconnected не меняет хоста');
+  const p2 = state.players.find((p) => p.id === 'p2')!;
+  assert.equal(p2.connected, false, 'игрок помечен офлайн');
+
+  const rejoined = addPlayer(state, 'p2', 'Гость');
+  assert.ok(rejoined.ok, 'вернувшийся игрок снова присоединяется');
+  assert.equal(state.players.find((p) => p.id === 'p2')!.connected, true, 'после возвращения снова online');
+  console.log('✓ markDisconnected не отнимает место в лобби, addPlayer возвращает игрока online');
+}
+
 function checkHotseat(): void {
   const state = createGame('SOLO1', 'p1', 42);
   assert.ok(setupHotseat(state, 'p1', 'Хост').ok);
   assert.equal(state.players.length, 2);
   assert.equal(state.settings.hotseat, true);
+  assert.ok(applyLobbyAction(state, 'p1', { type: 'configure', settings: { hotseat: false } }).ok);
+  assert.equal(state.settings.hotseat, true, 'hotseat в соло нельзя выключить через настройки');
   assert.ok(startGame(state, 'p1').ok);
   const first = currentPlayer(state)!;
   assert.equal(actingPlayerId(state, 'p1'), first.id, 'хост ходит за текущего игрока');
@@ -1757,12 +1866,204 @@ function checkSquare(): void {
   console.log('✓ каре: выбор, слабость конницы, содержание и запрет выйти под конями');
 }
 
+function checkValidateActions(): void {
+  const badGame: unknown[] = [
+    null,
+    {},
+    { type: 'build' },
+    { type: 'build', at: { x: 1, y: 1 }, building: 'constructor' },
+    { type: 'recruit', at: { x: 0, y: 0 }, count: NaN },
+    { type: 'move', from: { x: 'a', y: 0 }, to: { x: 1, y: 1 }, count: 1 },
+    { type: 'hack' },
+  ];
+  for (const raw of badGame) {
+    assert.equal(parseGameAction(raw), null, `должно быть отклонено: ${JSON.stringify(raw)}`);
+  }
+  assert.ok(
+    parseGameAction({ type: 'move', from: { x: 0, y: 0 }, to: { x: 1, y: 1 }, count: 3 }),
+    'корректный move проходит',
+  );
+  assert.ok(parseGameAction({ type: 'endTurn' }), 'корректный endTurn проходит');
+  assert.ok(parseGameAction({ type: 'squareReply', form: true }), 'корректный squareReply проходит');
+
+  const badLobby: unknown[] = [
+    null,
+    {},
+    { type: 'paint' },
+    { type: 'configure' },
+    { type: 'setAdmin', playerId: 'p1', admin: 'yes' },
+  ];
+  for (const raw of badLobby) {
+    assert.equal(parseLobbyAction(raw), null, `лобби-действие должно быть отклонено: ${JSON.stringify(raw)}`);
+  }
+  assert.ok(
+    parseLobbyAction({ type: 'configure', settings: { fogOfWar: false } }),
+    'корректный configure проходит',
+  );
+
+  const state = newGame();
+  const me = currentPlayer(state)!;
+  const capital = capitalOf(state, me.id);
+  assert.doesNotThrow(() => {
+    applyAction(state, me.id, { type: 'recruit', at: capital, count: 1, unit: 'constructor' as any });
+  }, 'подделанный unit не должен ронять движок');
+  console.log('✓ валидация входящих действий отбивает мусор');
+}
+
+/** Наполеоника: свежая конница рядом с пехотой в столице соперника. */
+function napoleonicCavalryVsInfantry(): { state: GameState; attackerId: string; defenderId: string; staging: Tile; cap: Tile } {
+  const state = napoleonicGame();
+  const attacker = currentPlayer(state)!;
+  const defender = state.players.find((p) => p.id !== attacker.id)!;
+  const cap = capitalOf(state, defender.id);
+  const staging = neighbors(state, cap).find((t) => TERRAIN[t.terrain].passable);
+  assert.ok(staging);
+  staging.ownerId = attacker.id;
+  staging.terrain = 'plains';
+  cap.terrain = 'plains';
+  staging.army = { medium_cavalry: 12 };
+  staging.movesLeft = 2;
+  cap.army = { medium_infantry: 12 };
+  cap.square = false;
+  return { state, attackerId: attacker.id, defenderId: defender.id, staging, cap };
+}
+
+function checkSquareOfferNeedsAction(): void {
+  const { state, attackerId, staging, cap } = napoleonicCavalryVsInfantry();
+  currentPlayer(state)!.actionsLeft = 0;
+  const hit = applyAction(state, attackerId, {
+    type: 'move',
+    from: { x: staging.x, y: staging.y },
+    to: { x: cap.x, y: cap.y },
+    count: 12,
+  });
+  assert.equal(hit.ok, false, 'без действий свежая конница не атакует');
+  assert.ok(!state.pendingSquare, 'и каре не предлагают');
+  console.log('✓ каре не предлагают, если у атакующего нет действий');
+}
+
+function checkSquareReplyFailSafe(): void {
+  const { state, attackerId, defenderId, staging, cap } = napoleonicCavalryVsInfantry();
+  const offered = applyAction(state, attackerId, {
+    type: 'move',
+    from: { x: staging.x, y: staging.y },
+    to: { x: cap.x, y: cap.y },
+    count: 12,
+  });
+  assert.ok(offered.ok && state.pendingSquare, 'каре предложено');
+  currentPlayer(state)!.actionsLeft = 0; // повтор хода теперь невозможен
+  const reply = applyAction(state, defenderId, { type: 'squareReply', form: false });
+  assert.ok(reply.ok, 'ответ обороны принимается, чтобы состояние разослали всем');
+  assert.equal(state.pendingSquare, null, 'ожидание каре снято');
+  assert.equal(armyCount(staging.army), 12, 'атака не состоялась');
+  console.log('✓ сорвавшаяся после каре атака не вешает партию');
+}
+
+function checkEliminateClearsSquare(): void {
+  const state = newGame();
+  const attacker = currentPlayer(state)!;
+  const defender = state.players.find((p) => p.id !== attacker.id)!;
+  const enemyCapital = capitalOf(state, defender.id);
+  const around = neighbors(state, enemyCapital).filter((t) => TERRAIN[t.terrain].passable);
+  const outpost = around[0]!;
+  const staging = around[1]!;
+  outpost.ownerId = defender.id;
+  outpost.army = { medium_infantry: 3 };
+  outpost.square = true;
+  staging.ownerId = attacker.id;
+  staging.terrain = 'plains';
+  staging.army = { heavy_cavalry: 200 };
+  staging.movesLeft = 2;
+  const result = applyAction(state, attacker.id, {
+    type: 'move',
+    from: { x: staging.x, y: staging.y },
+    to: { x: enemyCapital.x, y: enemyCapital.y },
+    count: 200,
+  });
+  assert.ok(result.ok);
+  assert.equal(outpost.ownerId, attacker.id, 'земли павшей державы переходят победителю');
+  assert.equal(outpost.square, false, 'каре павшей державы не достаётся победителю');
+  console.log('✓ падение державы снимает её каре');
+}
+
+function checkLobbyHostReassign(): void {
+  const state = createGame('HOSTX', 'p1', 1);
+  addPlayer(state, 'p1', 'Первый');
+  removePlayer(state, 'p1');
+  assert.equal(state.players.length, 0);
+  addPlayer(state, 'p2', 'Второй');
+  assert.equal(state.hostId, 'p2', 'в опустевшей комнате хостом становится вошедший');
+  addPlayer(state, 'p3', 'Третий');
+  assert.equal(state.hostId, 'p2', 'следующий игрок хоста не отнимает');
+
+  const botRoom = createGame('HOSTY', 'creator', 2);
+  addPlayer(botRoom, 'friend', 'Друг');
+  assert.equal(botRoom.hostId, 'creator', 'комната из /newgame ждёт своего создателя');
+  console.log('✓ опустевшее лобби получает нового хоста');
+}
+
+function checkForecastCommander(): void {
+  const state = newGame();
+  const attacker = currentPlayer(state)!;
+  const defender = state.players.find((p) => p.id !== attacker.id)!;
+  const cap = capitalOf(state, defender.id);
+  const army = { medium_infantry: 10 };
+  const base = battleForecastRatio(state, attacker, army, cap, defender);
+  const withWarlord = battleForecastRatio(state, attacker, army, cap, defender, false, {}, 'warlord');
+  assert.ok(withWarlord > base, 'командир атаки повышает прогноз');
+  cap.commander = 'marshal';
+  const vsMarshal = battleForecastRatio(state, attacker, army, cap, defender);
+  assert.ok(vsMarshal < base, 'маршал обороны понижает прогноз');
+  cap.commander = null;
+  cap.routedTurns = 1;
+  const vsRouted = battleForecastRatio(state, attacker, army, cap, defender);
+  assert.ok(vsRouted > base, 'бегущая оборона слабее и в прогнозе');
+  console.log('✓ прогноз боя учитывает командиров и бегство');
+}
+
+function checkShootNeedsVision(): void {
+  const state = newGame();
+  const attacker = currentPlayer(state)!;
+  const defender = state.players.find((p) => p.id !== attacker.id)!;
+  const shooter = capitalOf(state, attacker.id);
+  writeWings(shooter, [{ army: { medium_archer: 10 }, movesLeft: 1, shotsLeft: 1 }]);
+  // Цель на дальности залпа, но в лесу и не вплотную к нашим войскам — её не видно.
+  const target = state.tiles.find(
+    (t) =>
+      hexDistance(t, shooter) === 2 &&
+      !neighbors(state, t).some((n) => n.ownerId === attacker.id && armyCount(n.army) > 0),
+  );
+  assert.ok(target);
+  target.terrain = 'forest';
+  target.ownerId = defender.id;
+  target.army = { medium_infantry: 5 };
+  assert.equal(canSeeArmyOn(state, attacker.id, target), false, 'войско в лесу не видно издалека');
+  const hidden = applyAction(state, attacker.id, {
+    type: 'shoot',
+    from: { x: shooter.x, y: shooter.y },
+    to: { x: target.x, y: target.y },
+  });
+  assert.equal(hidden.ok, false, 'по невидимой цели не стреляют');
+
+  state.settings.fogOfWar = false;
+  const open = applyAction(state, attacker.id, {
+    type: 'shoot',
+    from: { x: shooter.x, y: shooter.y },
+    to: { x: target.x, y: target.y },
+  });
+  assert.ok(open.ok, 'без тумана та же цель доступна');
+  console.log('✓ залп только по видимой цели');
+}
+
 checkStart();
+checkValidateActions();
 checkLobbySettings();
 checkHotseat();
+checkMarkDisconnected();
 checkEras();
 checkSquare();
 checkActionLimit();
+checkNoAutoEndDuringFreeMarch();
 checkBattleAndElimination();
 checkFailedAttack();
 checkJointAttack();
@@ -1772,6 +2073,7 @@ checkFreshRecruitCanMove();
 checkMovementCap();
 checkConstruction();
 checkVolley();
+checkVolleyWipeClearsSquare();
 checkCasualtiesAndCommander();
 checkCharge();
 checkMergeKeepsWaitingStack();
@@ -1780,4 +2082,10 @@ checkForestMoveFxHidden();
 checkVision();
 checkBuildingMemory();
 checkHexGrid();
+checkSquareOfferNeedsAction();
+checkSquareReplyFailSafe();
+checkEliminateClearsSquare();
+checkLobbyHostReassign();
+checkForecastCommander();
+checkShootNeedsVision();
 console.log('\nВсе проверки правил пройдены.');

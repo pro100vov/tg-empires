@@ -15,7 +15,8 @@
     "build": "npm run build --workspace client",
     "start": "npm run start --workspace server",
     "typecheck": "tsc -p shared --noEmit && tsc -p server --noEmit && tsc -p client --noEmit",
-    "smoke": "tsx scripts/smoke.ts"
+    "smoke": "tsx scripts/smoke.ts",
+    "abuse": "tsx scripts/abuse.ts"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
