@@ -9,8 +9,13 @@ import {
   TERRAIN,
   CAPITAL_INCOME,
   ECONOMY_TECH_BONUS,
+  TURN_MINUTES_OPTIONS,
+  emptyStats,
   techCost,
 } from './config.js';
+import { TRUCE_ROUNDS, alliesOf, areAllies, atWar, pairKey, relationOf } from './diplomacy.js';
+import { EVENT_RULES, eventById, eventName, pickEvent } from './events.js';
+import type { EventContext, EventDef } from './events.js';
 import {
   capitalSpots,
   chargePathOpen,
@@ -28,6 +33,7 @@ import { COMMANDERS } from './commanders.js';
 import { ERAS, buildingsFor, commandersFor, eraOf, isEraId, techsFor } from './eras.js';
 import type {
   ActionResult,
+  AiLevel,
   Army,
   CommanderId,
   Coord,
@@ -36,7 +42,9 @@ import type {
   GameSettings,
   GameState,
   LobbyAction,
+  LogEntry,
   Player,
+  PlayerStats,
   Resources,
   TerrainType,
   Tile,
@@ -186,6 +194,7 @@ export function setupHotseat(state: GameState, hostId: string, hostName: string)
   const dummy = playerById(state, hotseatRivalId(hostId));
   if (dummy) dummy.connected = false;
   state.settings.hotseat = true;
+  state.settings.diplomacy = false;
   return { ok: true, events: [] };
 }
 
@@ -229,6 +238,56 @@ export function createGame(roomCode: string, hostId: string, seed: number): Game
     maxRounds: settings.maxRounds,
     log: [],
     winnerId: null,
+    turnDeadline: null,
+    history: [],
+    records: {},
+    relations: {},
+    proposals: [],
+  };
+}
+
+/**
+ * Дозаполняет состояние полями, добавленными позже: сохранённые до обновления партии
+ * должны загружаться и играться. Меняет объект на месте и возвращает его.
+ */
+export function normalizeState(state: GameState): GameState {
+  state.settings = { ...defaultGameSettings(), ...state.settings };
+  state.adminIds ??= [];
+  state.log ??= [];
+  state.history ??= [];
+  state.records ??= {};
+  state.relations ??= {};
+  state.proposals ??= [];
+  if (state.turnDeadline === undefined) state.turnDeadline = null;
+  for (const player of state.players) {
+    player.seenBuildings ??= {};
+    player.stats = { ...emptyStats(), ...player.stats };
+    player.effects ??= [];
+    player.recentEvents ??= [];
+    player.eventCooldown ??= 0;
+  }
+  for (const tile of state.tiles) {
+    tile.routedTurns ??= 0;
+  }
+  return state;
+}
+
+function newPlayer(state: GameState, id: string, name: string): Player {
+  return {
+    id,
+    name,
+    color: PLAYER_COLORS[state.players.length % PLAYER_COLORS.length]!,
+    resources: { ...START_RESOURCES },
+    tech: { attack: 0, defense: 0, economy: 0, logistics: 0 },
+    actionsLeft: 0,
+    alive: true,
+    connected: true,
+    seenBuildings: {},
+    stats: emptyStats(),
+    effects: [],
+    recentEvents: [],
+    eventCooldown: 0,
+    event: null,
   };
 }
 
@@ -242,47 +301,75 @@ export function addPlayer(state: GameState, id: string, name: string): ActionRes
   if (state.phase !== 'lobby') return { ok: false, error: 'Игра уже началась' };
   if (state.players.length >= MAX_PLAYERS) return { ok: false, error: 'В комнате нет мест' };
 
-  state.players.push({
-    id,
-    name,
-    color: PLAYER_COLORS[state.players.length % PLAYER_COLORS.length]!,
-    resources: { ...START_RESOURCES },
-    tech: { attack: 0, defense: 0, economy: 0, logistics: 0 },
-    actionsLeft: 0,
-    alive: true,
-    connected: true,
-    seenBuildings: {},
-  });
+  state.players.push(newPlayer(state, id, name));
   if (!state.hostId) state.hostId = id;
   return { ok: true, events: [`${name} присоединился к игре`] };
 }
 
+const AI_NAMES: Record<AiLevel, string[]> = {
+  easy: ['Новобранец', 'Оруженосец', 'Ополченец'],
+  normal: ['Полководец', 'Стратег', 'Воевода'],
+  hard: ['Завоеватель', 'Тиран', 'Император'],
+};
+
+export function isAiPlayer(playerId: string): boolean {
+  return playerId.startsWith('ai:');
+}
+
+export function aiLevelOf(state: GameState, playerId: string): AiLevel | null {
+  return playerById(state, playerId)?.ai ?? null;
+}
+
+/** ИИ-соперник в лобби: id `ai:<n>`, всегда «онлайн». */
+export function addAiPlayer(state: GameState, difficulty: AiLevel): ActionResult {
+  if (state.phase !== 'lobby') return { ok: false, error: 'Игра уже началась' };
+  if (state.settings.hotseat) return { ok: false, error: 'В партии «сам с собой» ИИ не нужен' };
+  if (state.players.length >= MAX_PLAYERS) return { ok: false, error: 'В комнате нет мест' };
+  if (!(difficulty in AI_NAMES)) return { ok: false, error: 'Неизвестная сложность ИИ' };
+  let n = 1;
+  while (playerById(state, `ai:${n}`)) n += 1;
+  const names = AI_NAMES[difficulty];
+  const player = newPlayer(state, `ai:${n}`, `ИИ ${names[(n - 1) % names.length]}`);
+  player.ai = difficulty;
+  state.players.push(player);
+  return { ok: true, events: [] };
+}
+
 /** Игрок временно ушёл (перезагрузка, разрыв связи) — место и права не отнимаем. */
 export function markDisconnected(state: GameState, id: string): void {
-  if (isHotseatRival(id)) return;
+  if (isHotseatRival(id) || isAiPlayer(id)) return;
   const player = playerById(state, id);
   if (player) player.connected = false;
 }
 
+function dropFromLobby(state: GameState, id: string): void {
+  state.players = state.players.filter((p) => p.id !== id);
+  state.players.forEach((p, i) => {
+    p.color = PLAYER_COLORS[i % PLAYER_COLORS.length]!;
+  });
+  // Ушли все — хоста нет, им станет следующий вошедший (см. addPlayer). ИИ хостом не бывает.
+  if (state.hostId === id) state.hostId = state.players.find((p) => !isAiPlayer(p.id))?.id ?? '';
+  state.adminIds = state.adminIds.filter((adminId) => adminId !== id && state.players.some((p) => p.id === adminId));
+}
+
 export function removePlayer(state: GameState, id: string): void {
-  if (isHotseatRival(id)) return;
+  if (isHotseatRival(id) || isAiPlayer(id)) return;
   if (state.phase === 'lobby') {
     if (state.settings.hotseat) {
       const player = playerById(state, id);
       if (player) player.connected = false;
       return;
     }
-    state.players = state.players.filter((p) => p.id !== id);
-    state.players.forEach((p, i) => {
-      p.color = PLAYER_COLORS[i % PLAYER_COLORS.length]!;
-    });
-    // Ушли все — хоста нет, им станет следующий вошедший (см. addPlayer).
-    if (state.hostId === id) state.hostId = state.players[0]?.id ?? '';
-    state.adminIds = state.adminIds.filter((adminId) => adminId !== id && state.players.some((p) => p.id === adminId));
+    dropFromLobby(state, id);
     return;
   }
   const player = playerById(state, id);
   if (player) player.connected = false;
+}
+
+/** Живые люди в партии (без ИИ и «Соперника» соло). */
+export function humanPlayers(state: GameState): Player[] {
+  return state.players.filter((p) => !isAiPlayer(p.id) && !isHotseatRival(p.id));
 }
 
 export function isLobbyAdmin(state: GameState, playerId: string): boolean {
@@ -307,6 +394,11 @@ function sanitizeSettings(patch: Partial<GameSettings>): Partial<GameSettings> {
   // hotseat выставляет только setupHotseat — через лобби его менять нельзя (иначе хост
   // может подменить режим и ходить за всех, либо сломать соло-партию).
   if (isEraId(patch.era)) next.era = patch.era;
+  if (patch.turnMinutes != null && (TURN_MINUTES_OPTIONS as readonly number[]).includes(patch.turnMinutes)) {
+    next.turnMinutes = patch.turnMinutes;
+  }
+  if (typeof patch.randomEvents === 'boolean') next.randomEvents = patch.randomEvents;
+  if (typeof patch.diplomacy === 'boolean') next.diplomacy = patch.diplomacy;
   if (patch.maxRounds != null) {
     const rounds = clampInt(patch.maxRounds, 15, 60);
     if (rounds != null) next.maxRounds = rounds;
@@ -352,6 +444,15 @@ export function applyLobbyAction(state: GameState, playerId: string, action: Lob
   }
 
   if (!isLobbyAdmin(state, playerId)) return { ok: false, error: 'Настраивать игру может хост или админ' };
+
+  if (action.type === 'addAi') return addAiPlayer(state, action.difficulty);
+
+  if (action.type === 'removeAi') {
+    const target = playerById(state, action.playerId);
+    if (!target || !isAiPlayer(target.id)) return { ok: false, error: 'Это не ИИ-соперник' };
+    dropFromLobby(state, target.id);
+    return { ok: true, events: [] };
+  }
 
   if (action.type === 'reroll') {
     state.seed = (state.seed + 0x9e3779b9) >>> 0;
@@ -463,11 +564,34 @@ export function computeIncome(state: GameState, playerId: string): Resources {
     }
   }
   const mult = 1 + ECONOMY_TECH_BONUS * player.tech.economy;
+  const eff = effectIncomeMul(player);
   return {
-    gold: Math.round(income.gold * mult),
-    food: Math.round(income.food * mult),
-    iron: Math.round(income.iron * mult),
+    gold: Math.round(income.gold * mult * eff.gold),
+    food: Math.round(income.food * mult * eff.food),
+    iron: Math.round(income.iron * mult * eff.iron),
   };
+}
+
+/** Произведение множителей дохода от действующих событий. */
+function effectIncomeMul(player: Player): Resources {
+  const mul: Resources = { gold: 1, food: 1, iron: 1 };
+  for (const effect of player.effects ?? []) {
+    if (!effect.incomeMul) continue;
+    mul.gold *= effect.incomeMul.gold ?? 1;
+    mul.food *= effect.incomeMul.food ?? 1;
+    mul.iron *= effect.incomeMul.iron ?? 1;
+  }
+  return mul;
+}
+
+/** Цена технологии для игрока: со скидкой «Учёного из-за моря». */
+export function techCostFor(player: Player, level: number): Resources {
+  const base = techCost(level);
+  let discount = 0;
+  for (const effect of player.effects ?? []) discount = Math.max(discount, effect.researchDiscount ?? 0);
+  if (discount <= 0) return base;
+  const k = 1 - discount;
+  return { gold: Math.ceil(base.gold * k), food: Math.ceil(base.food * k), iron: Math.ceil(base.iron * k) };
 }
 
 export function totalArmy(state: GameState, playerId: string): number {
@@ -484,14 +608,118 @@ export function upkeepFor(state: GameState, playerId: string): number {
   return Math.ceil(food - 1e-9);
 }
 
-function log(state: GameState, text: string): void {
-  state.log.push({ round: state.round, text });
-  if (state.log.length > 100) state.log.shift();
+/** Сколько записей журнала хранит партия (игроку приходит только видимая ему часть). */
+const LOG_LIMIT = 300;
+
+interface LogOpts {
+  /** Участники: видят запись всегда. */
+  actors?: (string | null | undefined)[];
+  /** Клетки события: запись видят и те, кто их наблюдает. Первая — для центрирования карты. */
+  at?: Coord[];
+  /** Центрировать карту на этой клетке, не делая её источником свидетелей. */
+  focus?: Coord;
+  /** Новость для всех. */
+  public?: boolean;
+}
+
+/**
+ * Запись журнала. Без `public` она видна участникам и тем, кто видит клетки события
+ * (считаем по состоянию на момент записи — вызывать после изменения клеток).
+ * Туман выключен — журнал общий.
+ */
+function log(state: GameState, text: string, opts: LogOpts = {}): void {
+  const entry: LogEntry = { round: state.round, text };
+  const first = opts.focus ?? opts.at?.[0];
+  if (first) entry.at = { x: first.x, y: first.y };
+  if (!opts.public && state.settings.fogOfWar !== false) {
+    const seen = new Set<string>();
+    for (const id of opts.actors ?? []) if (id) seen.add(id);
+    if (opts.at) {
+      for (const p of state.players) {
+        if (!p.alive || seen.has(p.id)) continue;
+        if (opts.at.some((c) => canWatchTile(state, p.id, c))) seen.add(p.id);
+      }
+    }
+    entry.seenBy = [...seen];
+  }
+  state.log.push(entry);
+  if (state.log.length > LOG_LIMIT) state.log.shift();
+}
+
+/** Публичная запись от сервера (например, «не успел — ход завершён»). */
+export function logPublic(state: GameState, text: string): void {
+  log(state, text, { public: true });
+}
+
+const clampStat = (n: number) => Math.max(0, Math.round(n));
+
+function stats(state: GameState, playerId: string | null | undefined): PlayerStats | null {
+  if (!playerId) return null;
+  return playerById(state, playerId)?.stats ?? null;
+}
+
+/** Записывает исход боя в счётчики и рекорды. */
+function recordBattle(
+  state: GameState,
+  attackerId: string,
+  defenderId: string | null,
+  atkBefore: number,
+  atkAfter: number,
+  defBefore: number,
+  defAfter: number,
+  attackerWon: boolean,
+): void {
+  const a = stats(state, attackerId);
+  const d = stats(state, defenderId);
+  const total = atkBefore + defBefore;
+  if (a) {
+    if (attackerWon) a.battlesWon += 1;
+    else a.battlesLost += 1;
+    a.unitsKilled += clampStat(defBefore - defAfter);
+    a.unitsLost += clampStat(atkBefore - atkAfter);
+    a.biggestBattle = Math.max(a.biggestBattle, total);
+  }
+  if (d) {
+    if (attackerWon) d.battlesLost += 1;
+    else d.battlesWon += 1;
+    d.unitsKilled += clampStat(atkBefore - atkAfter);
+    d.unitsLost += clampStat(defBefore - defAfter);
+    d.biggestBattle = Math.max(d.biggestBattle, total);
+  }
+  const records = state.records;
+  if (!records.firstBlood) records.firstBlood = { round: state.round, attackerId, defenderId };
+  if (!records.biggestBattle || total > records.biggestBattle.units) {
+    records.biggestBattle = { round: state.round, attackerId, defenderId, units: total };
+  }
+}
+
+/** Срез по игрокам на конец раунда — для графиков итогов. */
+function snapshotHistory(state: GameState, round: number): void {
+  if (state.history.some((h) => h.round === round)) return;
+  const players: Record<string, { score: number; tiles: number; army: number; income: number }> = {};
+  for (const p of state.players) {
+    players[p.id] = {
+      score: scoreOf(state, p.id),
+      tiles: state.tiles.reduce((n, t) => (t.ownerId === p.id ? n + 1 : n), 0),
+      army: totalArmy(state, p.id),
+      income: p.alive ? computeIncome(state, p.id).gold : 0,
+    };
+  }
+  state.history.push({ round, players });
+}
+
+/** Число клеток, перешедших к игроку, — в статистику. */
+function countCaptured(state: GameState, playerId: string, n = 1): void {
+  const s = stats(state, playerId);
+  if (s) s.tilesCaptured += n;
 }
 
 function beginTurn(state: GameState): void {
   const player = currentPlayer(state);
   if (!player) return;
+
+  // Разрыв договора, объявленный этим игроком в прошлых раундах, вступает в силу.
+  if (state.settings.diplomacy) enforceBreaks(state, player.id);
 
   for (const tile of state.tiles) {
     if (tile.ownerId !== player.id || !tile.construction) continue;
@@ -500,13 +728,15 @@ function beginTurn(state: GameState): void {
     tile.building = tile.construction.building;
     const name = buildingsOf(state)[tile.building].name;
     tile.construction = null;
-    log(state, `${name} достроена.`);
+    player.stats.buildingsBuilt += 1;
+    log(state, `${name} достроена.`, { actors: [player.id], at: [tile] });
   }
 
   const income = computeIncome(state, player.id);
   player.resources.gold += income.gold;
   player.resources.food += income.food;
   player.resources.iron += income.iron;
+  tickEffects(player);
 
   const upkeep = upkeepFor(state, player.id);
   if (player.resources.food >= upkeep) {
@@ -521,7 +751,7 @@ function beginTurn(state: GameState): void {
       tile.army = takeArmy(tile.army, loss).rest;
       deserted += loss;
     }
-    if (deserted > 0) log(state, `${player.name}: голод, дезертировало ${deserted} отр.`);
+    if (deserted > 0) log(state, `${player.name}: голод, дезертировало ${deserted} отр.`, { actors: [player.id] });
   }
 
   for (const tile of state.tiles) {
@@ -561,11 +791,13 @@ function beginTurn(state: GameState): void {
     squaresHeld += 1;
   }
   if (squaresHeld > 0) {
-    log(state, `${player.name}: каре держит строй (−${squaresHeld}⚡).`);
+    log(state, `${player.name}: каре держит строй (−${squaresHeld}⚡).`, { actors: [player.id] });
   }
   if (squaresBroke > 0) {
-    log(state, `${player.name}: каре рассыпалось.`);
+    log(state, `${player.name}: каре рассыпалось.`, { actors: [player.id] });
   }
+
+  if (state.settings.randomEvents) rollEvent(state, player);
 }
 
 function nextTurn(state: GameState): void {
@@ -575,19 +807,26 @@ function nextTurn(state: GameState): void {
     for (const tile of state.tiles) {
       if (tile.ownerId === ending.id && tile.routedTurns > 0) tile.routedTurns -= 1;
     }
+    // Не ответил на выбор — вариант «отказаться».
+    if (ending.event?.pending) resolveEventChoice(state, ending, 0);
+    // Предложения ему живут до конца его ближайшего хода.
+    state.proposals = state.proposals.filter((p) => p.to !== ending.id);
   }
   const alive = state.players.filter((p) => p.alive);
   if (alive.length <= 1) {
     finish(state, alive[0]?.id ?? null);
     return;
   }
+  if (checkAlliedVictory(state)) return;
 
   let guard = 0;
   do {
     state.turnIndex += 1;
     if (state.turnIndex >= state.order.length) {
       state.turnIndex = 0;
+      snapshotHistory(state, state.round);
       state.round += 1;
+      expireTruces(state);
       if (state.round > state.maxRounds) {
         finishByScore(state);
         return;
@@ -614,11 +853,29 @@ export function scoreOf(state: GameState, playerId: string): number {
   return score;
 }
 
+/** Порядок мест: победитель, затем живые по очкам, затем павшие — кто продержался дольше. */
+export function rankPlayers(state: GameState): Player[] {
+  const alive = state.players
+    .filter((p) => p.alive)
+    .sort((a, b) => {
+      if (a.id === state.winnerId) return -1;
+      if (b.id === state.winnerId) return 1;
+      return scoreOf(state, b.id) - scoreOf(state, a.id);
+    });
+  const dead = state.players.filter((p) => !p.alive).sort((a, b) => (b.deadRound ?? 0) - (a.deadRound ?? 0));
+  return [...alive, ...dead];
+}
+
 function finish(state: GameState, winnerId: string | null): void {
   state.phase = 'finished';
   state.winnerId = winnerId;
+  state.pendingSquare = null;
+  state.proposals = [];
+  for (const p of state.players) p.event = p.event?.pending ? { ...p.event, pending: false } : p.event;
+  // Раунд, в котором партия оборвалась, тоже попадает на график.
+  snapshotHistory(state, Math.min(state.round, state.maxRounds));
   const winner = winnerId ? playerById(state, winnerId) : null;
-  log(state, winner ? `Победа: ${winner.name}!` : 'Игра окончена.');
+  log(state, winner ? `Победа: ${winner.name}!` : 'Игра окончена.', { public: true });
 }
 
 function finishByScore(state: GameState): void {
@@ -626,7 +883,7 @@ function finishByScore(state: GameState): void {
     .filter((p) => p.alive)
     .map((p) => ({ id: p.id, score: scoreOf(state, p.id) }))
     .sort((a, b) => b.score - a.score);
-  log(state, 'Отведённое число раундов исчерпано, победа по очкам.');
+  log(state, 'Отведённое число раундов исчерпано, победа по очкам.', { public: true });
   finish(state, ranked[0]?.id ?? null);
 }
 
@@ -635,19 +892,568 @@ function eliminate(state: GameState, victimId: string, conquerorId: string): voi
   const conqueror = playerById(state, conquerorId);
   if (!victim) return;
   victim.alive = false;
+  victim.deadRound = state.round;
+  let taken = 0;
   for (const tile of state.tiles) {
     if (tile.ownerId !== victimId) continue;
     tile.ownerId = conquerorId;
     tile.construction = null;
     clearMarch(tile);
     if (tile.capitalOf === victimId) tile.capitalOf = null;
+    taken += 1;
   }
-  log(state, `Держава ${victim.name} пала под натиском ${conqueror?.name ?? 'врага'}.`);
+  if (taken > 1) countCaptured(state, conquerorId, taken - 1);
+  // Договоры и предложения павшей державы теряют смысл.
+  for (const key of Object.keys(state.relations)) {
+    if (key.split('|').includes(victimId)) delete state.relations[key];
+  }
+  state.proposals = state.proposals.filter((p) => p.from !== victimId && p.to !== victimId);
+  log(state, `Держава ${victim.name} пала под натиском ${conqueror?.name ?? 'врага'}.`, { public: true });
 }
 
 function nextRandom(state: GameState): number {
   state.seed = (Math.imul(state.seed, 1103515245) + 12345) >>> 0;
   return mulberry32(state.seed)();
+}
+
+// ── Случайные события ───────────────────────────────────────────────────────
+
+function tickEffects(player: Player): void {
+  for (const effect of player.effects) effect.turnsLeft -= 1;
+  player.effects = player.effects.filter((effect) => effect.turnsLeft > 0);
+}
+
+function turnsWord(n: number): string {
+  return n === 1 ? '1 ход' : n >= 2 && n <= 4 ? `${n} хода` : `${n} ходов`;
+}
+
+function rankOf(state: GameState, player: Player): 'leader' | 'lagging' | 'mid' {
+  const alive = state.players.filter((p) => p.alive);
+  if (alive.length < 2) return 'mid';
+  const mine = scoreOf(state, player.id);
+  const others = alive.filter((p) => p.id !== player.id).map((p) => scoreOf(state, p.id));
+  if (mine > Math.max(...others)) return 'leader';
+  if (mine < Math.min(...others)) return 'lagging';
+  return 'mid';
+}
+
+function capitalTileOf(state: GameState, playerId: string): Tile | undefined {
+  return state.tiles.find((t) => t.capitalOf === playerId && t.ownerId === playerId);
+}
+
+/** Крупнейший стек игрока (по числу отрядов); `pred` — доп. условие. */
+function biggestStack(state: GameState, playerId: string, pred: (t: Tile) => boolean = () => true): Tile | null {
+  let best: Tile | null = null;
+  for (const t of state.tiles) {
+    if (t.ownerId !== playerId || !pred(t)) continue;
+    const n = armyCount(t.army);
+    if (n > 0 && (!best || n > armyCount(best.army))) best = t;
+  }
+  return best;
+}
+
+function eventContext(state: GameState, player: Player): EventContext {
+  const ctx: EventContext = {
+    round: state.round,
+    tiles: 0,
+    farms: 0,
+    mines: 0,
+    markets: 0,
+    plains: 0,
+    hills: 0,
+    freeForests: 0,
+    army: 0,
+    gold: player.resources.gold,
+    actionsLeft: player.actionsLeft,
+    constructions: 0,
+    longConstructions: 0,
+    movingStacks: 0,
+    hasCapital: false,
+    capitalHasArmy: false,
+    capitalHasCommander: false,
+    enemyNeighbors: 0,
+    rivals: state.players.filter((p) => p.alive && p.id !== player.id && atWar(state, player.id, p.id)).length,
+  };
+  for (const tile of state.tiles) {
+    if (tile.ownerId !== player.id) continue;
+    ctx.tiles += 1;
+    if (tile.building === 'farm') ctx.farms += 1;
+    if (tile.building === 'mine') ctx.mines += 1;
+    if (tile.building === 'market') ctx.markets += 1;
+    if (tile.terrain === 'plains') ctx.plains += 1;
+    if (tile.terrain === 'hills') ctx.hills += 1;
+    const n = armyCount(tile.army);
+    ctx.army += n;
+    if (tile.terrain === 'forest' && n === 0 && !tile.capitalOf) ctx.freeForests += 1;
+    if (tile.construction) {
+      ctx.constructions += 1;
+      if (tile.construction.turnsLeft >= 2) ctx.longConstructions += 1;
+    }
+    if (n > 0 && tile.movesLeft > 0) ctx.movingStacks += 1;
+    if (tile.capitalOf === player.id) {
+      ctx.hasCapital = true;
+      ctx.capitalHasArmy = n > 0;
+      ctx.capitalHasCommander = Boolean(tile.commander);
+    }
+    for (const nb of neighbors(state, tile)) {
+      if (nb.ownerId && nb.ownerId !== player.id && armyCount(nb.army) > 0 && atWar(state, player.id, nb.ownerId)) {
+        ctx.enemyNeighbors += 1;
+      }
+    }
+  }
+  return ctx;
+}
+
+function rollEvent(state: GameState, player: Player): void {
+  if (!player.alive || state.round < EVENT_RULES.startRound) return;
+  if (player.eventCooldown > 0) {
+    player.eventCooldown -= 1;
+    return;
+  }
+  if (nextRandom(state) >= EVENT_RULES.chance) return;
+  const fresh = player.recentEvents.filter((e) => state.round - e.round < EVENT_RULES.repeatRounds);
+  const def = pickEvent(eventContext(state, player), {
+    recent: new Set(fresh.map((e) => e.id)),
+    rank: rankOf(state, player),
+    roll: nextRandom(state),
+  });
+  if (!def) return;
+  player.recentEvents = [...fresh, { id: def.id, round: state.round }];
+  player.eventCooldown = EVENT_RULES.cooldownTurns;
+  startEvent(state, player, def);
+}
+
+/** Запускает событие у игрока: с выбором — ждёт ответа, без — сразу применяет. */
+export function startEvent(state: GameState, player: Player, def: EventDef): void {
+  if (def.choice) {
+    player.event = { id: def.id, round: state.round, pending: true, detail: '' };
+    log(state, `${def.icon} ${eventName(def, era(state))}: нужно решение до конца хода.`, { actors: [player.id] });
+    return;
+  }
+  applyEventEffect(state, player, def, 1);
+}
+
+function resolveEventChoice(state: GameState, player: Player, choice: 0 | 1): ActionResult {
+  const pending = player.event;
+  if (!pending?.pending) return { ok: false, error: 'Сейчас нечего выбирать' };
+  const def = eventById(pending.id);
+  if (!def?.choice) {
+    player.event = null;
+    return { ok: false, error: 'Сейчас нечего выбирать' };
+  }
+  if (choice === 1 && def.choice.cost && !canAfford(player.resources, def.choice.cost)) {
+    return { ok: false, error: 'Не хватает ресурсов' };
+  }
+  applyEventEffect(state, player, def, choice);
+  return { ok: true, events: [] };
+}
+
+function addEffect(player: Player, effect: PlayerEffect): void {
+  player.effects = [...player.effects.filter((e) => e.id !== effect.id), effect];
+}
+type PlayerEffect = Player['effects'][number];
+
+function addUnitsAt(state: GameState, tile: Tile, unit: UnitId, count: number): void {
+  const units = unitsOf(state);
+  writeWings(tile, [
+    ...ensureWings(tile),
+    { army: { [unit]: count }, movesLeft: units[unit].speed + speedBonus(tile), shotsLeft: 1 },
+  ]);
+}
+
+function randomOf<T>(state: GameState, items: T[]): T | undefined {
+  if (items.length === 0) return undefined;
+  return items[Math.min(items.length - 1, Math.floor(nextRandom(state) * items.length))];
+}
+
+/** Применяет событие (или выбранный вариант) и записывает итог игроку. */
+function applyEventEffect(state: GameState, player: Player, def: EventDef, choice: 0 | 1): void {
+  const p = def.p;
+  const units = unitsOf(state);
+  let detail = '';
+  let at: Coord[] | undefined;
+  let good = def.tone === 'good';
+  let bad = def.tone === 'bad';
+  const cap = capitalTileOf(state, player.id);
+
+  switch (def.id) {
+    case 'harvest': {
+      const n = Math.round(computeIncome(state, player.id).food * p.pct!);
+      player.resources.food += n;
+      detail = `+${n}🌾`;
+      break;
+    }
+    case 'crop_failure':
+    case 'drought': {
+      addEffect(player, { id: def.id, turnsLeft: p.turns!, incomeMul: { food: p.mul! } });
+      detail = `🌾 −${Math.round((1 - p.mul!) * 100)}% на ${turnsWord(p.turns!)}`;
+      break;
+    }
+    case 'gold_vein': {
+      player.resources.gold += p.gold!;
+      detail = `+${p.gold}🪙`;
+      break;
+    }
+    case 'mine_collapse': {
+      addEffect(player, { id: def.id, turnsLeft: p.turns!, incomeMul: { iron: p.mul! } });
+      detail = `🔩 −${Math.round((1 - p.mul!) * 100)}% на ${turnsWord(p.turns!)}`;
+      break;
+    }
+    case 'caravan': {
+      if (choice === 1) {
+        player.resources.food -= p.food!;
+        player.resources.gold += p.gold!;
+        detail = `−${p.food}🌾 +${p.gold}🪙`;
+        good = true;
+      } else {
+        detail = 'Вы отказались';
+      }
+      break;
+    }
+    case 'patron': {
+      player.resources.gold += p.gold!;
+      player.resources.iron += p.iron!;
+      detail = `+${p.gold}🪙 +${p.iron}🔩`;
+      break;
+    }
+    case 'pilgrims': {
+      player.resources.gold += p.gold!;
+      player.resources.food += p.food!;
+      detail = `+${p.gold}🪙 +${p.food}🌾`;
+      break;
+    }
+    case 'tax_revolt': {
+      if (choice === 1) {
+        player.resources.gold -= p.gold!;
+        detail = `Откупились: −${p.gold}🪙`;
+        break;
+      }
+      const lost = randomOf(
+        state,
+        state.tiles.filter((t) => t.ownerId === player.id && !t.capitalOf && armyCount(t.army) === 0),
+      );
+      if (lost) {
+        lost.ownerId = null;
+        lost.construction = null;
+        lost.building = null;
+        clearMarch(lost);
+        at = [lost];
+        detail = 'Клетка отпала от державы';
+      } else {
+        detail = 'Бунт утих сам';
+      }
+      break;
+    }
+    case 'camp_plague': {
+      const tile = biggestStack(state, player.id);
+      if (tile) {
+        const before = armyCount(tile.army);
+        const loss = Math.min(before, Math.max(1, Math.floor(before * p.pct!)));
+        writeWings(tile, takeFromWings(ensureWings(tile), loss, undefined, 0).rest);
+        if (armyCount(tile.army) === 0) clearMarch(tile);
+        at = [tile];
+        detail = `−${loss} отр.`;
+      }
+      break;
+    }
+    case 'volunteers': {
+      if (cap) {
+        addUnitsAt(state, cap, 'light_infantry', p.count!);
+        detail = `+${p.count} × ${units.light_infantry.name}`;
+        at = [cap];
+      }
+      break;
+    }
+    case 'mercenaries': {
+      if (choice === 1 && cap) {
+        player.resources.gold -= p.gold!;
+        addUnitsAt(state, cap, 'medium_cavalry', p.count!);
+        detail = `−${p.gold}🪙, +${p.count} × ${units.medium_cavalry.name}`;
+        at = [cap];
+        good = true;
+      } else {
+        detail = 'Вы отказались';
+      }
+      break;
+    }
+    case 'holiday': {
+      player.actionsLeft += p.actions!;
+      detail = `+${p.actions}⚡`;
+      break;
+    }
+    case 'court_intrigue': {
+      player.actionsLeft = Math.max(0, player.actionsLeft - p.actions!);
+      detail = `−${p.actions}⚡`;
+      break;
+    }
+    case 'scholar': {
+      addEffect(player, { id: def.id, turnsLeft: p.turns!, researchDiscount: p.discount! });
+      detail = `Следующая технология −${Math.round(p.discount! * 100)}%`;
+      break;
+    }
+    case 'smiths': {
+      player.resources.iron += p.iron!;
+      detail = `+${p.iron}🔩`;
+      break;
+    }
+    case 'forest_fire': {
+      const tile = randomOf(
+        state,
+        state.tiles.filter((t) => t.ownerId === player.id && t.terrain === 'forest' && !t.capitalOf && armyCount(t.army) === 0),
+      );
+      if (tile) {
+        tile.terrain = 'plains';
+        at = [tile];
+        detail = 'Лес выгорел → равнина';
+      }
+      break;
+    }
+    case 'flood': {
+      const tile = randomOf(state, state.tiles.filter((t) => t.ownerId === player.id && t.construction));
+      if (tile?.construction) {
+        tile.construction.turnsLeft += p.turns!;
+        at = [tile];
+        detail = `Стройка задержана на ${turnsWord(p.turns!)}`;
+      }
+      break;
+    }
+    case 'master_builders': {
+      let n = 0;
+      for (const t of state.tiles) {
+        if (t.ownerId !== player.id || !t.construction || t.construction.turnsLeft < 2) continue;
+        t.construction.turnsLeft -= p.turns!;
+        n += 1;
+      }
+      detail = `Ускорено строек: ${n}`;
+      break;
+    }
+    case 'morale': {
+      addEffect(player, { id: def.id, turnsLeft: p.turns!, attackMul: p.mul! });
+      detail = `+${Math.round((p.mul! - 1) * 100)}% к атаке на ${turnsWord(p.turns!)}`;
+      break;
+    }
+    case 'fever': {
+      const tile = biggestStack(state, player.id, (t) => t.movesLeft > 0);
+      if (tile) {
+        writeWings(tile, ensureWings(tile).map((w) => ({ ...w, movesLeft: 0 })));
+        at = [tile];
+        detail = 'Крупнейший стек не ходит в этот ход';
+      }
+      break;
+    }
+    case 'hero': {
+      if (cap && armyCount(cap.army) > 0 && !cap.commander) {
+        const ids = Object.keys(commandersOf(state)) as CommanderId[];
+        const id = randomOf(state, ids);
+        if (id) {
+          giveCommander(state, cap, id);
+          detail = `Командир: ${commandersOf(state)[id].name}`;
+          at = [cap];
+        }
+      }
+      break;
+    }
+    case 'defectors': {
+      let source: Tile | undefined;
+      for (const t of state.tiles) {
+        if (t.ownerId !== player.id) continue;
+        for (const nb of neighbors(state, t)) {
+          if (nb.ownerId && nb.ownerId !== player.id && armyCount(nb.army) > 0 && atWar(state, player.id, nb.ownerId)) {
+            source = nb;
+          }
+        }
+        if (source) break;
+      }
+      const unit = source ? dominantUnit(source.army) : null;
+      if (cap && unit) {
+        addUnitsAt(state, cap, unit, p.count!);
+        detail = `+${p.count} × ${units[unit].name}`;
+        at = [cap];
+      }
+      break;
+    }
+    case 'spy': {
+      const rivals = state.players.filter((r) => r.alive && r.id !== player.id && capitalTileOf(state, r.id));
+      const rival = randomOf(state, rivals);
+      const rivalCap = rival ? capitalTileOf(state, rival.id) : undefined;
+      if (rival && rivalCap) {
+        let found = 0;
+        for (const t of state.tiles) {
+          if (!t.building || hexDistance(t, rivalCap) > p.radius!) continue;
+          const key = coordKey(t);
+          if (player.seenBuildings[key] !== t.building) found += 1;
+          player.seenBuildings[key] = t.building;
+        }
+        detail = `Раскрыто построек у ${rival.name}: ${found}`;
+      }
+      break;
+    }
+  }
+
+  if (def.tone === 'mixed') {
+    good = choice === 1;
+    bad = false;
+  }
+  if (good) player.stats.eventsGood += 1;
+  if (bad) player.stats.eventsBad += 1;
+  player.event = { id: def.id, round: state.round, pending: false, detail };
+  log(state, `${def.icon} ${eventName(def, era(state))}${detail ? `: ${detail}` : ''}`, {
+    actors: [player.id],
+    // Меняющие карту события видят и свидетели.
+    at: def.id === 'forest_fire' || def.id === 'tax_revolt' ? at : undefined,
+    focus: at?.[0],
+  });
+}
+
+/** Командир в стеке; ещё не ходившие крылья получают бонус скорости. */
+function giveCommander(state: GameState, tile: Tile, commander: CommanderId): void {
+  const unmovedWings = ensureWings(tile).map((wing) => {
+    const speed = armySpeed(wing.army, era(state));
+    if (wing.movesLeft >= speed) {
+      return { ...wing, movesLeft: speed + COMMANDERS[commander].speedBonus };
+    }
+    return wing;
+  });
+  tile.commander = commander;
+  writeWings(tile, unmovedWings);
+}
+
+// ── Дипломатия ──────────────────────────────────────────────────────────────
+
+const TREATY_NAME = { truce: 'перемирие', alliance: 'союз' } as const;
+
+/** Перемирия, сроки которых вышли к началу нового раунда, обращаются в войну. */
+function expireTruces(state: GameState): void {
+  for (const [key, rel] of Object.entries(state.relations)) {
+    if (rel.kind !== 'truce' || rel.until == null || rel.until > state.round) continue;
+    delete state.relations[key];
+    const names = key.split('|').map((id) => playerById(state, id)?.name ?? '—');
+    log(state, `Перемирие ${names.join(' и ')} истекло — снова война.`, { public: true });
+  }
+}
+
+/** Разрыв, объявленный игроком раньше, вступает в силу с его хода. */
+function enforceBreaks(state: GameState, playerId: string): void {
+  for (const [key, rel] of Object.entries(state.relations)) {
+    if (rel.breakBy !== playerId || rel.breakAt == null || state.round < rel.breakAt) continue;
+    delete state.relations[key];
+    const names = key.split('|').map((id) => playerById(state, id)?.name ?? '—');
+    log(state, `Война: ${names.join(' и ')} больше не связаны договором.`, { public: true });
+  }
+}
+
+/** Все живые попарно в союзе — партия заканчивается общей победой (по очкам). */
+function checkAlliedVictory(state: GameState): boolean {
+  if (!state.settings.diplomacy || state.phase !== 'playing') return false;
+  const alive = state.players.filter((p) => p.alive);
+  if (alive.length < 2) return false;
+  for (let i = 0; i < alive.length; i++) {
+    for (let j = i + 1; j < alive.length; j++) {
+      const rel = relationOf(state, alive[i]!.id, alive[j]!.id);
+      if (rel?.kind !== 'alliance' || rel.breakAt != null) return false;
+    }
+  }
+  const ranked = alive
+    .map((p) => ({ p, score: scoreOf(state, p.id) }))
+    .sort((a, b) => b.score - a.score);
+  for (const { p } of ranked.slice(1)) p.alliedWinner = true;
+  log(state, 'Все державы в союзе — общая победа!', { public: true });
+  finish(state, ranked[0]!.p.id);
+  return true;
+}
+
+const DIPLOMACY_ACTIONS = ['propose', 'acceptProposal', 'declineProposal', 'breakTreaty'] as const;
+
+function isDiplomacyAction(action: GameAction): action is Extract<GameAction, { type: (typeof DIPLOMACY_ACTIONS)[number] }> {
+  return (DIPLOMACY_ACTIONS as readonly string[]).includes(action.type);
+}
+
+function applyDiplomacy(
+  state: GameState,
+  playerId: string,
+  action: Extract<GameAction, { type: (typeof DIPLOMACY_ACTIONS)[number] }>,
+): ActionResult {
+  if (!state.settings.diplomacy || state.settings.hotseat) {
+    return { ok: false, error: 'Дипломатия выключена в этой партии' };
+  }
+  const me = playerById(state, playerId);
+  if (!me || !me.alive) return { ok: false, error: 'Вы вне игры' };
+
+  switch (action.type) {
+    case 'propose': {
+      const target = playerById(state, action.to);
+      if (!target || !target.alive || target.id === playerId) return { ok: false, error: 'Нет такой державы' };
+      const rel = relationOf(state, playerId, target.id);
+      if (rel?.breakAt != null) return { ok: false, error: 'Договор уже разрывается' };
+      if (state.proposals.some((p) => pairKey(p.from, p.to) === pairKey(playerId, target.id))) {
+        return { ok: false, error: 'Предложение этой державе уже есть — ответьте на него' };
+      }
+      if (action.kind === 'truce') {
+        if (rel) return { ok: false, error: 'С этой державой уже есть договор' };
+        if (!(TRUCE_ROUNDS as readonly number[]).includes(action.rounds ?? 0)) {
+          return { ok: false, error: 'Перемирие заключают на 3, 5 или 10 раундов' };
+        }
+      } else if (action.kind === 'alliance') {
+        if (rel?.kind === 'alliance') return { ok: false, error: 'Вы уже союзники' };
+      } else {
+        return { ok: false, error: 'Неизвестный договор' };
+      }
+      state.proposals.push({
+        id: `${playerId}>${target.id}`,
+        from: playerId,
+        to: target.id,
+        kind: action.kind,
+        ...(action.kind === 'truce' ? { rounds: action.rounds } : {}),
+        round: state.round,
+      });
+      log(
+        state,
+        `${me.name} предлагает ${target.name}: ${TREATY_NAME[action.kind]}${action.kind === 'truce' ? ` на ${action.rounds} р.` : ''}.`,
+        { public: true },
+      );
+      return { ok: true, events: ['proposal'] };
+    }
+
+    case 'acceptProposal':
+    case 'declineProposal': {
+      const idx = state.proposals.findIndex((p) => p.id === action.id && p.to === playerId);
+      if (idx < 0) return { ok: false, error: 'Предложение не найдено или устарело' };
+      const proposal = state.proposals[idx]!;
+      state.proposals.splice(idx, 1);
+      const from = playerById(state, proposal.from);
+      if (action.type === 'declineProposal') {
+        log(state, `${me.name} отклоняет предложение ${from?.name ?? '—'}.`, { public: true });
+        return { ok: true, events: [] };
+      }
+      if (!from?.alive) return { ok: false, error: 'Предложившей державы уже нет' };
+      state.relations[pairKey(proposal.from, proposal.to)] =
+        proposal.kind === 'truce'
+          ? { kind: 'truce', until: state.round + (proposal.rounds ?? 3) }
+          : { kind: 'alliance' };
+      log(
+        state,
+        `${from.name} и ${me.name}: ${TREATY_NAME[proposal.kind]}${proposal.kind === 'truce' ? ` на ${proposal.rounds} р.` : ''}.`,
+        { public: true },
+      );
+      checkAlliedVictory(state);
+      return { ok: true, events: ['treaty'] };
+    }
+
+    case 'breakTreaty': {
+      const other = playerById(state, action.with);
+      const rel = other ? relationOf(state, playerId, action.with) : undefined;
+      if (!other || !rel) return { ok: false, error: 'С этой державой нет договора' };
+      if (rel.breakAt != null) return { ok: false, error: 'Разрыв уже объявлен' };
+      rel.breakAt = state.round + 1;
+      rel.breakBy = playerId;
+      log(
+        state,
+        `${me.name} разрывает ${TREATY_NAME[rel.kind]} с ${other.name} — война с раунда ${rel.breakAt}.`,
+        { public: true },
+      );
+      return { ok: true, events: ['break'] };
+    }
+  }
 }
 
 export function defenseMultiplier(
@@ -664,7 +1470,9 @@ export function defenseMultiplier(
 }
 
 export function attackMultiplier(attacker: Player): number {
-  return 1 + 0.12 * attacker.tech.attack;
+  let mul = 1 + 0.12 * attacker.tech.attack;
+  for (const effect of attacker.effects ?? []) mul *= effect.attackMul ?? 1;
+  return mul;
 }
 
 function commanderBonus(id: CommanderId | null, stat: 'attack' | 'defense'): number {
@@ -973,14 +1781,15 @@ function applySquareReply(state: GameState, userId: string, form: boolean): Acti
   if (!canAnswerSquare(state, userId)) return { ok: false, error: 'Каре выбирает оборона' };
   const to = tileAt(state, pending.to.x, pending.to.y);
   const defender = pending.defenderId ? playerById(state, pending.defenderId) : undefined;
+  const squareLog = { actors: [pending.attackerId, pending.defenderId], focus: pending.to };
   if (form) {
     if (!to || !canFormSquare(to)) {
       return { ok: false, error: 'Этот отряд не может встать в каре' };
     }
     to.square = true;
-    log(state, `${defender?.name ?? 'Оборона'} ставит пехоту в каре.`);
+    log(state, `${defender?.name ?? 'Оборона'} ставит пехоту в каре.`, squareLog);
   } else {
-    log(state, `${defender?.name ?? 'Оборона'} встречает конницу в линии.`);
+    log(state, `${defender?.name ?? 'Оборона'} встречает конницу в линии.`, squareLog);
   }
   state.pendingSquare = null;
   resolvingSquareOffer = true;
@@ -1000,7 +1809,7 @@ function applySquareReply(state: GameState, userId: string, form: boolean): Acti
   // Ответ обороны уже изменил состояние (каре снято с ожидания) — его нужно разослать,
   // даже если атака не состоялась, иначе атакующий застрянет в окне «оборона решает».
   if (!result.ok) {
-    log(state, `Атака отменена: ${result.error}.`);
+    log(state, `Атака отменена: ${result.error}.`, squareLog);
     return { ok: true, events: [] };
   }
   return result;
@@ -1011,8 +1820,11 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
   if (action.type === 'squareReply') {
     return applySquareReply(state, playerId, action.form);
   }
+  // Договоры заключают и разрывают в любой момент, не тратя действий.
+  if (isDiplomacyAction(action)) return applyDiplomacy(state, playerId, action);
   const player = currentPlayer(state);
   if (!player || player.id !== playerId) return { ok: false, error: 'Сейчас не ваш ход' };
+  if (action.type === 'eventChoice') return resolveEventChoice(state, player, action.choice === 1 ? 1 : 0);
   if (state.pendingSquare) return { ok: false, error: 'Сначала оборона решает, вставать ли в каре' };
 
   switch (action.type) {
@@ -1028,12 +1840,14 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       const level = player.tech[action.tech];
       const info = techs[action.tech];
       if (level >= info.maxLevel) return { ok: false, error: 'Максимальный уровень' };
-      const cost = techCost(level);
+      const cost = techCostFor(player, level);
       if (!canAfford(player.resources, cost)) return { ok: false, error: 'Не хватает ресурсов' };
       pay(player.resources, cost);
       player.tech[action.tech] = level + 1;
       player.actionsLeft -= 1;
-      log(state, `${player.name} изучает ${info.name} (ур. ${level + 1})`);
+      // Скидка «Учёного из-за моря» действует на одну технологию.
+      player.effects = player.effects.filter((e) => e.researchDiscount == null);
+      log(state, `${player.name} изучает ${info.name} (ур. ${level + 1})`, { actors: [player.id] });
       return { ok: true, events: [] };
     }
 
@@ -1054,6 +1868,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       log(
         state,
         `${player.name} закладывает ${info.name} — ${info.buildTurns === 1 ? '1 ход' : `${info.buildTurns} хода`}.`,
+        { actors: [player.id], at: [tile] },
       );
       return { ok: true, events: [] };
     }
@@ -1079,7 +1894,8 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
         { army: { [unit]: count }, movesLeft: units[unit].speed + bonus, shotsLeft: 1 },
       ]);
       player.actionsLeft -= 1;
-      log(state, `${player.name} нанимает ${count} × ${units[unit].name}`);
+      player.stats.unitsRecruited += count;
+      log(state, `${player.name} нанимает ${count} × ${units[unit].name}`, { actors: [player.id], at: [tile] });
       return { ok: true, events: [] };
     }
 
@@ -1099,17 +1915,9 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       const info = commanders[action.commander];
       if (!canAfford(player.resources, info.cost)) return { ok: false, error: 'Не хватает ресурсов' };
       pay(player.resources, info.cost);
-      const unmovedWings = ensureWings(tile).map((wing) => {
-        const speed = armySpeed(wing.army, era(state));
-        if (wing.movesLeft >= speed) {
-          return { ...wing, movesLeft: speed + COMMANDERS[action.commander].speedBonus };
-        }
-        return wing;
-      });
-      tile.commander = action.commander;
-      writeWings(tile, unmovedWings);
+      giveCommander(state, tile, action.commander);
       player.actionsLeft -= 1;
-      log(state, `${player.name} назначает командира: ${info.name}`);
+      log(state, `${player.name} назначает командира: ${info.name}`, { actors: [player.id], at: [tile] });
       return { ok: true, events: [] };
     }
 
@@ -1119,6 +1927,9 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       if (!from || !to) return { ok: false, error: 'Клетки не существует' };
       if (!TERRAIN[to.terrain].passable) return { ok: false, error: 'Через горы и море не пройти' };
       if (from.ownerId !== playerId) return { ok: false, error: 'Это не ваша клетка' };
+      if (to.ownerId && to.ownerId !== playerId && !atWar(state, playerId, to.ownerId)) {
+        return { ok: false, error: 'Договор запрещает входить на земли этой державы' };
+      }
       if (from.routedTurns > 0) {
         return { ok: false, error: 'Отступающим отрядом нельзя управлять' };
       }
@@ -1171,7 +1982,10 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
           charging,
           supportFrom: allies.map((tile) => ({ x: tile.x, y: tile.y })),
         };
-        log(state, `${player.name}: конница на пехоту — оборона решает, вставать ли в каре.`);
+        log(state, `${player.name}: конница на пехоту — оборона решает, вставать ли в каре.`, {
+          actors: [playerId, to.ownerId],
+          focus: { x: to.x, y: to.y },
+        });
         return { ok: true, events: ['square-offer'] };
       }
 
@@ -1209,11 +2023,23 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
           if (armyCount(step.army) > 0) continue;
           step.ownerId = playerId;
           step.construction = null;
+          countCaptured(state, playerId);
         }
+      };
+
+      // Кто владел клеткой до хода — участник боя и свидетель захвата для журнала.
+      const prevOwner = to.ownerId;
+      const battleLog = {
+        actors: [playerId, prevOwner],
+        at: [
+          { x: to.x, y: to.y },
+          { x: from.x, y: from.y },
+        ],
       };
 
       const occupy = (incoming: typeof arrivingWings, capture: boolean) => {
         const keep = !capture && to.ownerId === playerId ? ensureWings(to) : [];
+        if (to.ownerId !== playerId) countCaptured(state, playerId);
         to.ownerId = playerId;
         if (capture) {
           to.construction = null;
@@ -1245,6 +2071,16 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
         const support = allies.reduce((army, tile) => mergeArmies(army, tile.army), {} as Army);
         const supportCount = armyCount(support);
         const outcome = resolveBattle(state, player, defender, taken, to, movingCommander, charging, support);
+        recordBattle(
+          state,
+          playerId,
+          defender?.id ?? null,
+          armyCount(taken) + supportCount,
+          armyCount(outcome.attackerSurvivors),
+          armyCount(to.army),
+          armyCount(outcome.defenderSurvivors),
+          outcome.attackerWon,
+        );
         const split = splitByRatio([taken, ...allies.map((tile) => tile.army)], armyCount(outcome.attackerSurvivors));
         const moverSurvivors = split[0] ?? {};
         const applyAllyLosses = () => {
@@ -1282,17 +2118,19 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
                 outcome.defenderRouted
                   ? `Бой: оборона обращена в бегство на ${outcome.defenderRoutTurns} х.${fleeLogSuffix(fled, true)}.`
                   : `Бой: остатки обороны отступают${fleeLogSuffix(fled, false)}.`,
+                battleLog,
               );
             } else if (fled.lostExtra > 0 && fled.left === 0) {
-              log(state, `Бой: оборона зажата с тыла, остатки пали (−${fled.lostExtra} отр.).`);
+              log(state, `Бой: оборона зажата с тыла, остатки пали (−${fled.lostExtra} отр.).`, battleLog);
             } else {
-              log(state, `Бой: отступать некуда, остатки обороны пали.`);
+              log(state, `Бой: отступать некуда, остатки обороны пали.`, battleLog);
             }
           }
           occupy([{ army: moverSurvivors, movesLeft: 0, shotsLeft: 0 }], true);
           log(
             state,
             `${charging ? chargeWord(state) : 'Бой'}: ${player.name}${supportCount > 0 ? ` бьёт вместе (${allies.length + 1} отр.)` : ' побеждает'}, осталось ${armyCount(outcome.attackerSurvivors)} отр.`,
+            battleLog,
           );
           if (capitalVictim && capitalVictim !== playerId) {
             to.capitalOf = null;
@@ -1332,6 +2170,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
               : fled.lostExtra > 0 && fled.left === 0
                 ? `${charging ? chargeWord(state) : 'Бой'}: атака ${player.name} зажата с тыла и уничтожена (−${fled.lostExtra} отр.).`
                 : `${charging ? chargeWord(state) : 'Бой'}: атака ${player.name}${supportCount > 0 ? ' (несколько отрядов)' : ''} обращена в бегство на ${outcome.attackerRoutTurns} х., уцелело ${fled.left} отр., отходить некуда${fled.lostExtra > 0 ? `, −${fled.lostExtra} с тыла` : ''}.`,
+            battleLog,
           );
         } else {
           writeWings(from, [
@@ -1344,6 +2183,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
           log(
             state,
             `${charging ? chargeWord(state) : 'Бой'}: атака ${player.name}${supportCount > 0 ? ' (несколько отрядов)' : ''} отбита, уцелело ${armyCount(outcome.attackerSurvivors)} отр.`,
+            battleLog,
           );
         }
         events.push(outcome.attackerRouted ? 'battle-rout' : 'battle-lost');
@@ -1358,7 +2198,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
         to.capitalOf = null;
         eliminate(state, capitalVictim, playerId);
       } else {
-        log(state, `${player.name} занимает клетку`);
+        log(state, `${player.name} занимает клетку`, battleLog);
       }
 
       const alive = state.players.filter((p) => p.alive);
@@ -1385,6 +2225,9 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       const range = armyRange(from.army, era(state), from.terrain);
       if (dist < 1 || dist > range) return { ok: false, error: 'Цель вне дальности' };
       if (to.ownerId === playerId) return { ok: false, error: 'Нельзя стрелять по своим' };
+      if (to.ownerId && !atWar(state, playerId, to.ownerId)) {
+        return { ok: false, error: 'Договор запрещает огонь по этой державе' };
+      }
       if (armyCount(to.army) < 1) return { ok: false, error: 'Некого обстреливать' };
       // Клиент не подсвечивает скрытые туманом цели — сервер тоже не даёт стрелять вслепую.
       if (!canWatchTile(state, playerId, to) || !canSeeArmyOn(state, playerId, to)) {
@@ -1415,6 +2258,17 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       let losses = Math.min(defCount, Math.max(0, Math.round(defCount * Math.min(1, ratio * 0.55))));
       if (ratio < 2.2 && defCount > 1) losses = Math.min(losses, defCount - 1);
       player.actionsLeft -= 1;
+      const shooterStats = player.stats;
+      shooterStats.unitsKilled += losses;
+      const targetStats = stats(state, to.ownerId);
+      if (targetStats) targetStats.unitsLost += losses;
+      const volleyLog = {
+        actors: [playerId, to.ownerId],
+        at: [
+          { x: to.x, y: to.y },
+          { x: from.x, y: from.y },
+        ],
+      };
       writeWings(
         from,
         ensureWings(from).map((wing) => ({
@@ -1433,13 +2287,13 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       };
 
       if (losses <= 0) {
-        log(state, `${flavorOf(state).volleyLabel} ${player.name} не нанёс потерь.`);
+        log(state, `${flavorOf(state).volleyLabel} ${player.name} не нанёс потерь.`, volleyLog);
         return { ok: true, events: ['volley'], fx: { ...fxBase, battle: 'lost' } };
       }
 
       if (losses >= defCount) {
         clearMarch(to);
-        log(state, `${flavorOf(state).volleyLabel} ${player.name} уничтожает гарнизон.`);
+        log(state, `${flavorOf(state).volleyLabel} ${player.name} уничтожает гарнизон.`, volleyLog);
         return { ok: true, events: ['volley-wipe'], fx: { ...fxBase, battle: 'won' } };
       }
 
@@ -1477,9 +2331,10 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
             : fled.lostExtra > 0 && fled.left === 0
               ? `${flavorOf(state).volleyLabel} ${player.name}: −${losses} отр., гарнизон зажат с тыла и уничтожен (−${fled.lostExtra}).`
               : `${flavorOf(state).volleyLabel} ${player.name}: −${losses} отр., гарнизон в панике на ${routTurns} х.${fled.lostExtra > 0 ? `, −${fled.lostExtra} с тыла` : ''}, бежать некуда.`,
+          volleyLog,
         );
       } else {
-        log(state, `${flavorOf(state).volleyLabel} ${player.name}: −${losses} отр. у обороны.`);
+        log(state, `${flavorOf(state).volleyLabel} ${player.name}: −${losses} отр. у обороны.`, volleyLog);
       }
       return { ok: true, events: ['volley'], fx: { ...fxBase, battle: routed ? 'rout' : 'lost' } };
     }
@@ -1494,7 +2349,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       if (!canFormSquare(tile)) return { ok: false, error: 'В каре встаёт пехота, не в лесу' };
       tile.square = true;
       player.actionsLeft -= 1;
-      log(state, `${player.name} ставит пехоту в каре.`);
+      log(state, `${player.name} ставит пехоту в каре.`, { actors: [player.id], at: [tile] });
       return { ok: true, events: ['square-form'] };
     }
 
@@ -1507,7 +2362,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
         return { ok: false, error: 'Каре не разойти, пока рядом вражеская конница' };
       }
       tile.square = false;
-      log(state, `${player.name} распускает каре.`);
+      log(state, `${player.name} распускает каре.`, { actors: [player.id], at: [tile] });
       return { ok: true, events: ['square-break'] };
     }
 

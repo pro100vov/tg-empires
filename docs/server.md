@@ -97,3 +97,17 @@ Payload каждого действия сначала проходит `parseGa
   чтобы сам обход не продлевал жизнь комнате.
 - `touchRoom`, `deleteRoom`, `summarize` — вспомогательные (сейчас почти не используются).
 - `startRoomCleanup()` — раз в 5 мин удаляет: пустые (все `connected=false`) старше 30 мин, прочие — старше 6 ч без активности.
+
+## Новое (план функций 2026-09-29)
+
+- `storage.ts` — JSON на диске (`DATA_DIR`, по умолчанию `<root>/data`): `dataFile`, `writeJsonAtomic`, `readJsonSafe` (битый файл → `*.broken-<ts>.json`).
+- `rooms.ts` — автосохранение `rooms.json` раз в 5 с (`markDirty`, `saveRooms`, `loadRooms`), SIGTERM/SIGINT сохраняют синхронно; TTL: лобби 6 ч / 30 мин без людей, партия 7 дней, законченная 24 ч; `myGames(userId)`.
+- `turnClock.ts` — таймер хода (`state.turnDeadline`): `syncTurnClock`, `turnExpired`, `pauseTurnClock` (блиц не гонит пустую партию). `sweep()` сжигает ход по дедлайну; при `turnMinutes >= 60` офлайн-пропуск (3 мин) не действует.
+- `users.ts` — реестр игроков (`data/users.json`): `canNotify`, `notify`, id последнего сообщения «ваш ход» по комнатам.
+- `notify.ts` — очередь сообщений бота (~20/с): «Ваш ход», напоминание (0 → за 1 мин до офлайн-пропуска, 60 мин → за 15 мин, 24 ч → за 2 ч, блиц — нет), итоги партии, приглашение на реванш, предложение договора с кнопками. Без `BOT_TOKEN` — в консоль `[notify]`.
+- `rematch.ts` — `rematchRoom`: новая комната с теми же настройками и ИИ, код в `state.rematchCode`.
+- `aiRunner.ts` — ходы ИИ с паузой 500–700 мс, каждое действие через `pushState` с fx; запускается из `pushState` и после загрузки с диска.
+- `hub.ts` — мост `pushStateSafe` для модулей без доступа к `io`.
+- Socket-события: `me` (`{id,name,canNotify}`), `room:mine`, `room:rematch`, `user:write`, `room:solo` с `{ai:[...], tutorial}`.
+- Бот: `/games`, `/notify on|off`, callback `rematch:КОД`, `dip:a|d:КОД:ОТ`.
+- Состояние приходит с `serverNow` (сверка обратного отсчёта).

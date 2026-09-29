@@ -1,4 +1,5 @@
 import { HEX_COL_STEP, HEX_HEIGHT, HEX_ROW_STEP, HEX_WIDTH, MAP_SIZE, TERRAIN } from './config.js';
+import { areAllies, atWar } from './diplomacy.js';
 import { mulberry32 } from './rng.js';
 import type { Coord, GameState, TerrainType, Tile } from './types.js';
 import { armyCount } from './units.js';
@@ -99,9 +100,19 @@ export function chargePathOpen(state: GameState, from: Coord, to: Coord, playerI
     if (!isAdjacent(bridge, to)) return false;
     if (!TERRAIN[bridge.terrain].passable) return false;
     if (bridge.terrain === 'forest') return false;
-    if (armyCount(bridge.army) > 0 && bridge.ownerId !== playerId) return false;
+    if (bridge.ownerId && bridge.ownerId !== playerId) {
+      // Союзник пропускает через свою клетку; перемирие не пускает; при войне мешают только войска.
+      if (areAllies(state, playerId, bridge.ownerId)) return true;
+      if (!atWar(state, playerId, bridge.ownerId)) return false;
+      if (armyCount(bridge.army) > 0) return false;
+    }
     return true;
   });
+}
+
+/** Земли державы, с которой у нас договор, — путь и цель хода закрыты. */
+function shielded(state: GameState, playerId: string, tile: Tile): boolean {
+  return tile.ownerId != null && tile.ownerId !== playerId && !atWar(state, playerId, tile.ownerId);
 }
 
 function hexKey(c: Coord): string {
@@ -125,6 +136,7 @@ export function walkPath(
   if (hexKey(from) === goal) return [{ x: from.x, y: from.y }];
   const dest = tileAt(state, to.x, to.y);
   if (!dest || !TERRAIN[dest.terrain].passable) return null;
+  if (shielded(state, playerId, dest)) return null;
   const destEnemy = dest.ownerId !== playerId && armyCount(dest.army) > 0;
   if (destEnemy && !allowEnemy) return null;
 
@@ -141,6 +153,7 @@ export function walkPath(
       const k = hexKey(n);
       if (prev.has(k)) continue;
       if (!TERRAIN[n.terrain].passable) continue;
+      if (shielded(state, playerId, n)) continue;
       const enemy = n.ownerId !== playerId && armyCount(n.army) > 0;
       if (enemy && (k !== goal || !allowEnemy)) continue;
       prev.set(k, cur);
@@ -180,6 +193,7 @@ export function walkReachable(
       const k = hexKey(n);
       if (seen.has(k)) continue;
       if (!TERRAIN[n.terrain].passable) continue;
+      if (shielded(state, playerId, n)) continue;
       const enemy = n.ownerId !== playerId && armyCount(n.army) > 0;
       if (enemy && !allowEnemy) continue;
       seen.add(k);

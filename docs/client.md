@@ -83,3 +83,7 @@ Dev: `vite` на :5173, проксирует `/socket.io` на :3000 (`vite.conf
 - `:96-122` — расчёт позиции/угла анимации fx.
 - `:140-260` — отрисовка тайлов: классы (`fog`, `in-square`, `has-commander`, `has-construction`, `capital-spot`), армия, ★, постройка/стройка, командир, каре. Во время fx армия «вычитается» из исходной клетки.
 - `:261+` — летящий токен `fx-token` (классы по роду/тиру/исходу боя).
+
+## Новое (план функций 2026-09-29)
+
+`LogSheet` (журнал), `EndScreen` (итоги, график, армии, рекорды; `StatsSheet` — 📈 в игре), `EventCard` (+`EffectChips`), `DiplomacySheet`, `MiniMap` и кнопки 🗺/🏰/⚔️ (`MapBoard` отдаёт `MapHandle.centerOn` через ref), `Tutorial` (подсветка по `data-tour`, флаг в CloudStorage/localStorage), меню «Мои партии», «Соло → Против ИИ / Учебная партия», таймер в верхней панели, `labels.ts`.

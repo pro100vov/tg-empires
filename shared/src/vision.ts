@@ -1,4 +1,6 @@
 import { COMMANDERS } from './commanders.js';
+import { emptyStats } from './config.js';
+import { areAllies } from './diplomacy.js';
 import type { Coord, GameFx, GameState, TerrainType, Tile } from './types.js';
 import { hexDistance, hexLine, neighbors, tileAt } from './map.js';
 import { armyCount } from './units.js';
@@ -20,12 +22,18 @@ export function observerRange(tile: Tile): number {
   return range;
 }
 
-/** Откуда смотрит игрок: свои войска, столица, крепость. */
+/** Свой или союзный владелец: у союзников общий обзор. */
+function isFriend(state: GameState, viewerId: string, ownerId: string | null): boolean {
+  if (!ownerId) return false;
+  return ownerId === viewerId || areAllies(state, viewerId, ownerId);
+}
+
+/** Откуда смотрит игрок: свои и союзные войска, столица, крепость. */
 export function visionObservers(state: GameState, playerId: string): Tile[] {
   return state.tiles.filter(
     (tile) =>
-      tile.ownerId === playerId &&
-      (armyCount(tile.army) > 0 || tile.capitalOf === playerId || tile.building === 'fort'),
+      isFriend(state, playerId, tile.ownerId) &&
+      (armyCount(tile.army) > 0 || tile.capitalOf === tile.ownerId || tile.building === 'fort'),
   );
 }
 
@@ -58,7 +66,7 @@ export function canWatchTile(state: GameState, viewerId: string, target: Coord):
   if (state.settings?.fogOfWar === false) return true;
   const tile = tileAt(state, target.x, target.y);
   if (!tile) return false;
-  if (tile.ownerId === viewerId) return true;
+  if (isFriend(state, viewerId, tile.ownerId)) return true;
   for (const observer of visionObservers(state, viewerId)) {
     if (hexDistance(observer, target) > observerRange(observer)) continue;
     if (!hasLineOfSight(state, observer, target)) continue;
@@ -69,14 +77,16 @@ export function canWatchTile(state: GameState, viewerId: string, target: Coord):
 
 function isContact(state: GameState, viewerId: string, tile: Tile): boolean {
   return neighbors(state, tile).some(
-    (n) => n.ownerId === viewerId && (armyCount(n.army) > 0 || n.capitalOf === viewerId || n.building === 'fort'),
+    (n) =>
+      isFriend(state, viewerId, n.ownerId) &&
+      (armyCount(n.army) > 0 || n.capitalOf === n.ownerId || n.building === 'fort'),
   );
 }
 
 /** Была бы видна армия на клетке, даже если её сейчас нет. Лес — только в упор. */
 export function canDetectArmyOn(state: GameState, viewerId: string, tile: Tile): boolean {
   if (state.settings?.fogOfWar === false) return true;
-  if (tile.ownerId === viewerId) return true;
+  if (isFriend(state, viewerId, tile.ownerId)) return true;
   if (isContact(state, viewerId, tile)) return true;
   if (tile.terrain === 'forest') return false;
   return canWatchTile(state, viewerId, tile);
@@ -84,7 +94,7 @@ export function canDetectArmyOn(state: GameState, viewerId: string, tile: Tile):
 
 /** Чужую армию видно: в обзоре, не за укрытием; лес — только в упор. */
 export function canSeeArmyOn(state: GameState, viewerId: string, tile: Tile): boolean {
-  if (tile.ownerId === viewerId) return true;
+  if (isFriend(state, viewerId, tile.ownerId)) return true;
   if (armyCount(tile.army) === 0) return true;
   return canDetectArmyOn(state, viewerId, tile);
 }
@@ -113,7 +123,7 @@ export function rememberSeenBuildings(state: GameState, viewerId: string): void 
   if (!player.seenBuildings) player.seenBuildings = {};
   for (const tile of state.tiles) {
     if (!tile.building) continue;
-    if (tile.ownerId === viewerId || canWatchTile(state, viewerId, tile)) {
+    if (isFriend(state, viewerId, tile.ownerId) || canWatchTile(state, viewerId, tile)) {
       player.seenBuildings[tileKey(tile)] = tile.building;
     }
   }
@@ -121,7 +131,7 @@ export function rememberSeenBuildings(state: GameState, viewerId: string): void 
 
 function maskTile(state: GameState, viewerId: string, tile: Tile): Tile {
   const seen = state.players.find((p) => p.id === viewerId)?.seenBuildings ?? {};
-  const watching = tile.ownerId === viewerId || canWatchTile(state, viewerId, tile);
+  const watching = isFriend(state, viewerId, tile.ownerId) || canWatchTile(state, viewerId, tile);
   if (watching) {
     return canSeeArmyOn(state, viewerId, tile) ? tile : hideArmy(tile);
   }
@@ -146,8 +156,26 @@ export function maskStateFor(state: GameState, viewerId: string): GameState {
     players: state.players.map((player) =>
       player.id === viewerId
         ? player
-        : { ...player, seenBuildings: {}, resources: { gold: 0, food: 0, iron: 0 } },
+        : {
+            ...player,
+            seenBuildings: {},
+            resources: { gold: 0, food: 0, iron: 0 },
+            tech: { attack: 0, defense: 0, economy: 0, logistics: 0 },
+            stats: emptyStats(),
+            effects: [],
+            recentEvents: [],
+            eventCooldown: 0,
+            event: null,
+          },
     ),
+    // Журнал: записи, привязанные к скрытым туманом делам, чужим не отдаём.
+    log: state.log.filter((entry) => !entry.seenBy || entry.seenBy.includes(viewerId)),
+    // Графики и рекорды раскрывают чужие армии и доходы — во время игры только свой ряд.
+    history: (state.history ?? []).map((point) => ({
+      round: point.round,
+      players: point.players[viewerId] ? { [viewerId]: point.players[viewerId]! } : {},
+    })),
+    records: {},
   };
 }
 

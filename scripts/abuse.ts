@@ -17,6 +17,21 @@ const BAD_GAME_ACTIONS: unknown[] = [
   { type: 'move', from: { x: 'a', y: 0 }, to: { x: 1, y: 1 }, count: 1 },
   { type: 'appoint', at: { x: 0, y: 0 }, commander: '__proto__' },
   { type: 'hack' },
+  { type: 'eventChoice' },
+  { type: 'eventChoice', choice: 7 },
+  { type: 'eventChoice', choice: '1' },
+  { type: 'propose' },
+  { type: 'propose', to: 5, kind: 'truce' },
+  { type: 'propose', to: 'x', kind: '__proto__', rounds: 3 },
+  { type: 'propose', to: 'x', kind: 'truce', rounds: NaN },
+  { type: 'propose', to: 'abuse-2', kind: 'truce', rounds: 1e12 },
+  { type: 'propose', to: 'abuse-2', kind: 'truce', rounds: 4 },
+  { type: 'propose', to: 'abuse-tester', kind: 'alliance' },
+  { type: 'acceptProposal', id: { a: 1 } },
+  { type: 'acceptProposal', id: 'нет>такого' },
+  { type: 'declineProposal', id: 'x'.repeat(5000) },
+  { type: 'breakTreaty', with: '__proto__' },
+  { type: 'breakTreaty', with: 'abuse-2' },
   'не объект',
   42,
   ['array'],
@@ -28,6 +43,13 @@ const BAD_LOBBY_ACTIONS: unknown[] = [
   { type: 'paint' },
   { type: 'configure' },
   { type: 'setAdmin', playerId: 'p1', admin: 'yes' },
+  { type: 'addAi' },
+  { type: 'addAi', difficulty: '__proto__' },
+  { type: 'addAi', difficulty: 9 },
+  { type: 'removeAi' },
+  { type: 'removeAi', playerId: { x: 1 } },
+  { type: 'removeAi', playerId: 'abuse-tester' },
+  { type: 'configure', settings: { turnMinutes: 'много', randomEvents: 'да', diplomacy: {} } },
 ];
 
 async function health(): Promise<boolean> {
@@ -75,7 +97,7 @@ async function main(): Promise<void> {
   }
 
   const socket = await connect('abuse-tester');
-  await emit(socket, 'room:create', {});
+  const created = (await emit(socket, 'room:create', {})) as { state?: { roomCode?: string } };
 
   for (const action of BAD_GAME_ACTIONS) {
     await emit(socket, 'game:action', { action });
@@ -83,6 +105,29 @@ async function main(): Promise<void> {
   for (const action of BAD_LOBBY_ACTIONS) {
     await emit(socket, 'lobby:action', { action });
   }
+
+  // Идущая партия с двумя людьми и ИИ: то же самое, но уже с настоящим движком.
+  const second = await connect('abuse-2');
+  await emit(second, 'room:join', { roomCode: created.state?.roomCode });
+  await emit(socket, 'lobby:action', { action: { type: 'addAi', difficulty: 'hard' } });
+  await emit(socket, 'game:start', {});
+  for (const action of BAD_GAME_ACTIONS) {
+    await emit(socket, 'game:action', { action });
+    await emit(second, 'game:action', { action });
+  }
+  await emit(socket, 'room:rematch', {});
+  await emit(second, 'room:rematch', {});
+  second.close();
+
+  // Новые события сокета с мусором.
+  for (const payload of [null, {}, 'строка', 42, { ai: 'hard' }, { ai: [] }, { ai: ['x'] }, { ai: ['easy', 'easy', 'easy', 'easy'] }, { ai: [{}] }, { ai: ['hard'], tutorial: 'да' }]) {
+    await emit(socket, 'room:solo', payload);
+  }
+  await emit(socket, 'room:mine', null);
+  await emit(socket, 'room:mine', 'мусор');
+  socket.emit('user:write', 'мусор');
+  socket.emit('room:mine');
+  socket.emit('room:rematch');
   // Мусор верхнего уровня — не {action: ...}, а вообще что попало.
   await emit(socket, 'game:action', null);
   await emit(socket, 'game:action', 'строка вместо объекта');

@@ -26,6 +26,6 @@
 ## Ключевые факты
 
 - Правила меняются только в `shared/src/engine.ts` и данных (`config.ts`, `units.ts`, `eras.ts`); сервер generic.
-- Состояние партий только в памяти (`server/src/rooms.ts`) — рестарт сервиса стирает игры.
+- Партии живут в памяти (`server/src/rooms.ts`) и сохраняются в `data/rooms.json` (`server/src/storage.ts`) — переживают рестарт.
 - Прод: `ssh peepuy`, `/root/tg-empires`, `systemctl restart tg-empires`.
 - Проверка правил: `npm run smoke`, типы: `npm run typecheck`.

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ACTION_OPTIONS,
   ERA_IDS,
@@ -9,18 +9,33 @@ import {
   MIN_PLAYERS,
   ROUND_OPTIONS,
   TERRAIN,
+  TURN_MINUTES_OPTIONS,
   isHotseatRival,
   isLobbyAdmin,
 } from '@tge/shared';
-import type { GameState, LobbyAction, TerrainType } from '@tge/shared';
+import type { AiLevel, GameState, LobbyAction, MyGame, TerrainType } from '@tge/shared';
 import { haptic } from '../telegram';
+import { AI_LABEL, leftLabel, turnMinutesHint, turnMinutesLabel } from '../labels';
 import MapBoard from './MapBoard';
+
+const AI_LEVELS: AiLevel[] = ['easy', 'normal', 'hard'];
+
+export interface SoloOptions {
+  /** Соперники-ИИ: по одной сложности на каждого. Без поля — «сам с собой». */
+  ai?: AiLevel[];
+  /** Учебная партия: маленькая карта, один лёгкий ИИ, старт сразу. */
+  tutorial?: boolean;
+}
 
 interface Props {
   state: GameState | null;
   me: { id: string; name: string };
   onCreate: () => void;
-  onSolo: () => void;
+  onSolo: (options?: SoloOptions) => void;
+  onMine: () => Promise<MyGame[]>;
+  onTutorial?: () => void;
+  /** «❓ Обучение»: показать обучение заново. */
+  onHelp?: () => void;
   onJoin: (code: string) => void;
   onStart: () => void;
   onLobby: (action: LobbyAction) => void;
@@ -36,10 +51,27 @@ const BRUSH_ICON: Record<TerrainType, string> = {
   water: '🌊',
 };
 
-export default function Lobby({ state, me, onCreate, onSolo, onJoin, onStart, onLobby, onExit }: Props) {
+export default function Lobby({ state, me, onCreate, onSolo, onMine, onTutorial, onHelp, onJoin, onStart, onLobby, onExit }: Props) {
   const [code, setCode] = useState('');
   const [copied, setCopied] = useState(false);
   const [brush, setBrush] = useState<TerrainType>('forest');
+  const [mine, setMine] = useState<MyGame[]>([]);
+  const [soloMode, setSoloMode] = useState<'pick' | 'ai' | null>(null);
+  const [aiCount, setAiCount] = useState(1);
+  const [aiLevel, setAiLevel] = useState<AiLevel>('normal');
+  const inMenu = state === null;
+
+  // «Мои партии» обновляем при каждом открытии меню.
+  useEffect(() => {
+    if (!inMenu) return;
+    let alive = true;
+    void onMine().then((games) => {
+      if (alive) setMine(games);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [inMenu, onMine]);
 
   if (!state) {
     return (
@@ -53,6 +85,31 @@ export default function Lobby({ state, me, onCreate, onSolo, onJoin, onStart, on
           </p>
         </div>
 
+        {mine.length > 0 && (
+          <div className="my-games">
+            <div className="panel-title">Мои партии</div>
+            {mine.map((game) => (
+              <button key={game.roomCode} type="button" className="my-game" onClick={() => onJoin(game.roomCode)}>
+                <span className="my-game-code">{game.roomCode}</span>
+                <span className="my-game-dots">
+                  {game.players.map((p, i) => (
+                    <span key={i} className="dot" style={{ background: p.color }} title={p.name} />
+                  ))}
+                </span>
+                <span className="grow muted small">
+                  {game.phase === 'lobby'
+                    ? 'лобби'
+                    : game.phase === 'finished'
+                      ? 'окончена'
+                      : `раунд ${game.round}/${game.maxRounds}${game.myTurn ? '' : ` · ходит ${game.turnName}`}`}
+                  {game.phase === 'playing' && game.deadline ? ` · ⏱ ${leftLabel(game.deadline - Date.now())}` : ''}
+                </span>
+                {game.myTurn && <span className="badge-turn">Ваш ход</span>}
+              </button>
+            ))}
+          </div>
+        )}
+
         <button
           className="btn primary big"
           onClick={() => {
@@ -63,18 +120,92 @@ export default function Lobby({ state, me, onCreate, onSolo, onJoin, onStart, on
           Создать партию
         </button>
 
-        <button
-          className="btn big"
-          onClick={() => {
-            haptic('medium');
-            onSolo();
-          }}
-        >
-          Сам с собой
-        </button>
-        <p className="muted small center-text">
-          Обе державы по очереди на одном экране — так удобно проверить туман, ход и бой.
-        </p>
+        {soloMode === null && (
+          <button
+            className="btn big"
+            onClick={() => {
+              haptic('medium');
+              setSoloMode('pick');
+            }}
+          >
+            Соло
+          </button>
+        )}
+        {soloMode === 'pick' && (
+          <div className="card solo-card">
+            <button
+              className="btn big"
+              onClick={() => {
+                haptic('medium');
+                onSolo();
+              }}
+            >
+              Сам с собой
+            </button>
+            <p className="muted small center-text">
+              Обе державы по очереди на одном экране — так удобно проверить туман, ход и бой.
+            </p>
+            <button className="btn big" onClick={() => setSoloMode('ai')}>
+              Против ИИ
+            </button>
+            {onTutorial && (
+              <button
+                className="btn big"
+                onClick={() => {
+                  haptic('medium');
+                  onTutorial();
+                }}
+              >
+                Учебная партия
+              </button>
+            )}
+            <button className="btn" onClick={() => setSoloMode(null)}>
+              Назад
+            </button>
+          </div>
+        )}
+        {soloMode === 'ai' && (
+          <div className="card solo-card">
+            <div className="setting-label">Соперников</div>
+            <div className="choice-row">
+              {[1, 2, 3].map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  className={`choice${aiCount === n ? ' selected' : ''}`}
+                  onClick={() => setAiCount(n)}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+            <div className="setting-label">Сложность</div>
+            <div className="choice-row">
+              {AI_LEVELS.map((level) => (
+                <button
+                  key={level}
+                  type="button"
+                  className={`choice${aiLevel === level ? ' selected' : ''}`}
+                  onClick={() => setAiLevel(level)}
+                >
+                  {AI_LABEL[level]}
+                </button>
+              ))}
+            </div>
+            <button
+              className="btn primary big"
+              onClick={() => {
+                haptic('medium');
+                onSolo({ ai: Array.from({ length: aiCount }, () => aiLevel) });
+              }}
+            >
+              К настройкам партии
+            </button>
+            <button className="btn" onClick={() => setSoloMode('pick')}>
+              Назад
+            </button>
+          </div>
+        )}
 
         <div className="join-row">
           <input
@@ -88,6 +219,12 @@ export default function Lobby({ state, me, onCreate, onSolo, onJoin, onStart, on
             Войти
           </button>
         </div>
+
+        {onHelp && (
+          <button className="btn" onClick={onHelp}>
+            ❓ Обучение
+          </button>
+        )}
       </div>
     );
   }
@@ -127,7 +264,17 @@ export default function Lobby({ state, me, onCreate, onSolo, onJoin, onStart, on
             )}
             {player.id === me.id && <span className="tag">вы</span>}
             {isHotseatRival(player.id) && <span className="tag">вторая держава</span>}
-            {isHost && player.id !== me.id && !isHotseatRival(player.id) && (
+            {player.ai && <span className="tag">ИИ · {AI_LABEL[player.ai]}</span>}
+            {canEdit && player.ai && (
+              <button
+                type="button"
+                className="btn tiny"
+                onClick={() => send({ type: 'removeAi', playerId: player.id })}
+              >
+                убрать
+              </button>
+            )}
+            {isHost && player.id !== me.id && !isHotseatRival(player.id) && !player.ai && (
               <button
                 type="button"
                 className="btn tiny"
@@ -152,6 +299,24 @@ export default function Lobby({ state, me, onCreate, onSolo, onJoin, onStart, on
         ))}
       </div>
 
+      {canEdit && !state.settings.hotseat && state.players.length < MAX_PLAYERS && (
+        <div className="card ai-add">
+          <span className="muted small">Добавить ИИ-соперника:</span>
+          <div className="choice-row">
+            {AI_LEVELS.map((level) => (
+              <button
+                key={level}
+                type="button"
+                className="choice"
+                onClick={() => send({ type: 'addAi', difficulty: level })}
+              >
+                + {AI_LABEL[level]}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="card settings-card">
         <div className="panel-title">Настройки партии</div>
         {!canEdit && (
@@ -167,6 +332,10 @@ export default function Lobby({ state, me, onCreate, onSolo, onJoin, onStart, on
             {settings.maxRounds} раундов
             {' · '}
             {settings.actionsPerTurn}⚡
+            {' · '}
+            ⏱ {turnMinutesLabel(settings.turnMinutes)}
+            {settings.randomEvents ? ' · 🎲 события' : ''}
+            {settings.diplomacy ? ' · 🤝 дипломатия' : ''}
           </p>
         )}
 
@@ -278,6 +447,45 @@ export default function Lobby({ state, me, onCreate, onSolo, onJoin, onStart, on
                     {n}⚡
                   </button>
                 ))}
+              </div>
+            </div>
+
+            <div className="setting-block">
+              <div className="setting-label">Время на ход</div>
+              <div className="choice-row wrap">
+                {TURN_MINUTES_OPTIONS.map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    className={`choice${settings.turnMinutes === n ? ' selected' : ''}`}
+                    onClick={() => send({ type: 'configure', settings: { turnMinutes: n } })}
+                  >
+                    {turnMinutesLabel(n)}
+                  </button>
+                ))}
+              </div>
+              <p className="muted small">{turnMinutesHint(settings.turnMinutes)}</p>
+            </div>
+
+            <div className="setting-block">
+              <div className="setting-label">Правила</div>
+              <div className="choice-row wrap">
+                <button
+                  type="button"
+                  className={`choice${settings.randomEvents ? ' selected' : ''}`}
+                  onClick={() => send({ type: 'configure', settings: { randomEvents: !settings.randomEvents } })}
+                >
+                  🎲 Случайные события
+                </button>
+                {!settings.hotseat && (
+                  <button
+                    type="button"
+                    className={`choice${settings.diplomacy ? ' selected' : ''}`}
+                    onClick={() => send({ type: 'configure', settings: { diplomacy: !settings.diplomacy } })}
+                  >
+                    🤝 Дипломатия
+                  </button>
+                )}
               </div>
             </div>
 

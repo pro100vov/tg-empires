@@ -1,4 +1,4 @@
-import { canAfford, techCost, techsFor } from '@tge/shared';
+import { canAfford, techCostFor, techsFor } from '@tge/shared';
 import type { EraId, Player, TechType } from '@tge/shared';
 
 interface Props {
@@ -20,7 +20,7 @@ export default function TechModal({ player, isMyTurn, actionsLeft, era, onResear
           const info = catalog[key];
           const level = player.tech[key];
           const maxed = level >= info.maxLevel;
-          const cost = techCost(level);
+          const cost = techCostFor(player, level);
           const affordable = canAfford(player.resources, cost);
           return (
             <div key={key} className="tech-row">

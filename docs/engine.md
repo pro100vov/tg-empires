@@ -135,3 +135,12 @@
 
 ## rng.ts
 `mulberry32(seed)`, `randomSeed()`, `randomRoomCode()` (5 символов без 0/O/1/I).
+
+## Новое (план функций 2026-09-29)
+
+- `log(state, text, {actors, at, focus, public})` — запись журнала с `seenBy`; `maskStateFor` фильтрует журнал, скрывает чужие `tech`, `stats`, `effects`, `event`, историю и рекорды (до конца партии).
+- `normalizeState` — дефолты для сохранений старого формата; новые поля всегда с дефолтом.
+- Статистика: `Player.stats`, `state.history` (срез на конец раунда и в `finish`), `state.records`; `rankPlayers`.
+- `events.ts` — таблица 24 событий и `pickEvent`; применение — `applyEventEffect`/`rollEvent`/`startEvent` в engine (бросок в конце `beginTurn`, с 3-го раунда, 25 %, пауза 2 хода, без повторов 5 раундов). Выбор — действие `eventChoice`; без ответа к концу хода — вариант 0. Эффекты: `Player.effects` (`computeIncome`, `attackMultiplier`, `techCostFor`).
+- `diplomacy.ts` + engine: `relations`, `proposals`, действия `propose/acceptProposal/declineProposal/breakTreaty` (без ⚡, не только в свой ход). Перемирие/союз блокируют вход на земли, залп и путь (`map.ts shielded`); союз — общий обзор (`vision.ts isFriend`), проход набега через союзную клетку; разрыв — `breakAt` = раунд+1, вступает с хода разорвавшего; все живые в союзе → общая победа.
+- ИИ: `ai.ts` — `planAiTurn` (варианты по убыванию ценности, пороги в `TUNING`), `planAiDiplomacy`, `aiSquareReply`, `stepAi`. Игроки `ai:<n>`, лобби-действия `addAi/removeAi`.

@@ -8,13 +8,19 @@ import express from 'express';
 import { Server } from 'socket.io';
 import type { Socket } from 'socket.io';
 
-import { addPlayer, applyAction, applyLobbyAction, autoEndTurnIfExhausted, actingPlayerId, currentPlayer, maskFxFor, markDisconnected, parseGameAction, parseLobbyAction, publicView, removePlayer, rememberSeenBuildings, setupHotseat, startGame } from '@tge/shared';
-import type { GameFx, GameState } from '@tge/shared';
+import { addAiPlayer, addPlayer, applyAction, applyLobbyAction, autoEndTurnIfExhausted, actingPlayerId, currentPlayer, humanPlayers, isHotseatRival, logPublic, maskFxFor, markDisconnected, parseGameAction, parseLobbyAction, publicView, removePlayer, rememberSeenBuildings, setupHotseat, startGame } from '@tge/shared';
+import type { AiLevel, GameFx, GameState } from '@tge/shared';
 
 import { devUser, verifyInitData } from './auth.js';
 import type { AuthUser } from './auth.js';
-import { createRoom, getRoom, listRooms, startRoomCleanup } from './rooms.js';
+import { createRoom, getRoom, listRooms, loadRooms, markDirty, myGames, saveRooms, startRoomAutosave, startRoomCleanup } from './rooms.js';
 import { startBot } from './bot.js';
+import { kickAi } from './aiRunner.js';
+import { bindPush } from './hub.js';
+import { inviteToRematch, onStateChanged, restoreNotifyState, tickReminders } from './notify.js';
+import { rematchRoom } from './rematch.js';
+import { pauseTurnClock, restoreTurnClock, syncTurnClock, turnExpired } from './turnClock.js';
+import { getUser, loadUsers, saveUsers, startUsersAutosave, touchUser } from './users.js';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 dotenv.config({ path: path.join(rootDir, '.env') });
@@ -57,16 +63,23 @@ io.use((socket, next) => {
   if (!user && DEV_MODE) user = devUser(auth?.devId);
   if (!user) return next(new Error('Не удалось подтвердить пользователя Telegram'));
   (socket.data as SocketData).user = user;
+  // Разрешение писать в личку не отзываем по одному входу без него: его дают /start и requestWriteAccess.
+  touchUser(user.id, user.name, user.allowsWrite ? true : undefined);
   next();
 });
 
 function viewOf(state: GameState, userId: string): GameState {
+  syncTurnClock(state);
   const viewer = actingPlayerId(state, userId);
   rememberSeenBuildings(state, viewer);
-  return publicView(state, viewer);
+  return { ...publicView(state, viewer), serverNow: Date.now() };
 }
 
 async function pushState(state: GameState, payload?: { fx?: GameFx; skip?: string }): Promise<void> {
+  syncTurnClock(state);
+  markDirty(state.roomCode);
+  onStateChanged(state);
+  kickAi(state);
   const sockets = await io.in(state.roomCode).fetchSockets();
   for (const s of sockets) {
     if (payload?.skip && s.id === payload.skip) continue;
@@ -84,6 +97,7 @@ async function pushState(state: GameState, payload?: { fx?: GameFx; skip?: strin
 function pushStateSafe(state: GameState, payload?: { fx?: GameFx; skip?: string }): void {
   pushState(state, payload).catch((err) => console.error('[server] pushState:', err));
 }
+bindPush(pushStateSafe);
 
 type Ack = (response: { ok: true; state: GameState; fx?: GameFx } | { ok: false; error: string }) => void;
 /** Для событий без состояния в ответе (room:leave) — не ломаем общий Ack. */
@@ -100,6 +114,17 @@ function safe<P>(name: string, handler: (payload: P, reply: Ack) => void | Promi
       reply({ ok: false, error: 'Внутренняя ошибка сервера' });
     }
   };
+}
+
+/** Список сложностей ИИ из запроса: 1–3 известных значения, иначе null. */
+function parseAiLevels(raw: unknown): AiLevel[] | null {
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > 3) return null;
+  const out: AiLevel[] = [];
+  for (const item of raw) {
+    if (item !== 'easy' && item !== 'normal' && item !== 'hard') return null;
+    out.push(item);
+  }
+  return out;
 }
 
 /** Ключ учёта офлайн-времени игрока в комнате: своя запись на каждую пару комната/игрок. */
@@ -144,7 +169,7 @@ async function enterRoom(socket: Socket, state: GameState): Promise<void> {
 io.on('connection', (socket) => {
   const data = socket.data as SocketData;
   const { user } = data;
-  socket.emit('me', user);
+  socket.emit('me', { id: user.id, name: user.name, canNotify: getUser(user.id)?.canNotify ?? false });
 
   const joinState = async (state: GameState, ack: Ack) => {
     if (state.settings.hotseat && user.id !== state.hostId && !state.players.some((p) => p.id === user.id)) {
@@ -170,10 +195,29 @@ io.on('connection', (socket) => {
 
   socket.on(
     'room:solo',
-    safe<unknown>('room:solo', async (_payload, reply) => {
+    safe<{ ai?: unknown; tutorial?: unknown }>('room:solo', async (payload, reply) => {
+      // «Против ИИ»: обычная комната, где вместе с игроком сидят 1–3 ИИ; хост сам настраивает и стартует.
+      const levels = parseAiLevels(payload?.ai);
+      if (levels) {
+        const state = createRoom(user.id);
+        addPlayer(state, user.id, user.name);
+        for (const level of levels) addAiPlayer(state, level);
+        if (payload?.tutorial === true) {
+          // Учебная партия: маленькая карта, один лёгкий ИИ, без случайных событий, сразу в бой.
+          applyLobbyAction(state, user.id, { type: 'configure', settings: { mapSize: 8, randomEvents: false } });
+          const started = startGame(state, user.id);
+          if (!started.ok) return reply({ ok: false, error: started.error });
+        }
+        await enterRoom(socket, state);
+        markDirty(state.roomCode);
+        reply({ ok: true, state: viewOf(state, user.id) });
+        pushStateSafe(state);
+        return;
+      }
       const state = createRoom(user.id);
       const result = setupHotseat(state, user.id, user.name);
       if (!result.ok) return reply({ ok: false, error: result.error });
+      markDirty(state.roomCode);
       await enterRoom(socket, state);
       reply({ ok: true, state: viewOf(state, user.id) });
     }),
@@ -188,6 +232,38 @@ io.on('connection', (socket) => {
       const state = code ? getRoom(code) : undefined;
       if (!state) return reply({ ok: false, error: 'Комната не найдена' });
       await joinState(state, reply);
+    }),
+  );
+
+  /** «Мои партии»: те же данные, что в боте (/games). */
+  socket.on('room:mine', (_payload: unknown, ack?: unknown) => {
+    if (typeof ack !== 'function') return;
+    try {
+      (ack as (r: unknown) => void)({ ok: true, games: myGames(user.id) });
+    } catch (err) {
+      console.error('[socket] room:mine:', err);
+      (ack as (r: unknown) => void)({ ok: false, error: 'Внутренняя ошибка сервера' });
+    }
+  });
+
+  /** Игрок разрешил боту писать в личку (Telegram requestWriteAccess). */
+  socket.on('user:write', (_payload: unknown, ack?: unknown) => {
+    touchUser(user.id, user.name, true);
+    if (typeof ack === 'function') (ack as (r: unknown) => void)({ ok: true });
+  });
+
+  /** Реванш после конца партии: новая комната с теми же настройками или вход в уже созданную. */
+  socket.on(
+    'room:rematch',
+    safe<unknown>('room:rematch', async (_payload, reply) => {
+      const old = data.roomCode ? getRoom(data.roomCode) : undefined;
+      if (!old) return reply({ ok: false, error: 'Комната не найдена' });
+      const result = rematchRoom(old, user.id, user.name);
+      if (!result.ok) return reply({ ok: false, error: result.error });
+      await joinState(result.state, reply);
+      // Старая комната узнаёт код реванша; остальных участников зовёт бот.
+      pushStateSafe(old);
+      if (result.created) inviteToRematch(old, result.state.roomCode, user.id);
     }),
   );
 
@@ -268,7 +344,45 @@ io.on('connection', (socket) => {
   });
 });
 
+// Партии переживают рестарт: поднимаем с диска, людей считаем офлайн с этого момента.
+loadUsers();
+startUsersAutosave();
+for (const state of loadRooms()) {
+  restoreTurnClock(state);
+  restoreNotifyState(state);
+  kickAi(state);
+  for (const player of state.players) {
+    if (!player.connected && !isHotseatRival(player.id)) offlineSince.set(offlineKey(state.roomCode, player.id), Date.now());
+  }
+}
 startRoomCleanup();
+startRoomAutosave();
+
+/** Сохраняем всё перед остановкой (systemctl restart шлёт SIGTERM). */
+function shutdown(signal: string): void {
+  console.log(`[server] ${signal}: сохраняем партии и выходим`);
+  saveRooms(true);
+  saveUsers(true);
+  process.exit(0);
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+/** С такого времени на ход партия асинхронная: офлайн-пропуск (3 мин) не действует. */
+const ASYNC_TURN_MINUTES = 60;
+
+/** Ход сгорел по таймеру: сначала автоответ обороны (если ждём каре), потом конец хода. */
+function expireTurn(state: GameState): boolean {
+  const current = currentPlayer(state);
+  if (!current) return false;
+  if (state.pendingSquare) {
+    applyAction(state, state.pendingSquare.defenderId, { type: 'squareReply', form: false });
+    squareSeenAt.delete(state.roomCode);
+  }
+  if (state.phase !== 'playing') return true;
+  logPublic(state, `${current.name} не успел — ход завершён.`);
+  return applyAction(state, current.id, { type: 'endTurn' }).ok;
+}
 
 /** Когда в комнате увидели текущий pendingSquare — отсчёт тайм-аута ответа обороны. */
 const squareSeenAt = new Map<string, { pending: NonNullable<GameState['pendingSquare']>; at: number }>();
@@ -298,6 +412,19 @@ function sweep(): void {
     // В соло ждать некого: за «Соперника» (он всегда офлайн) каре выбирает сам хост.
     if (state.settings.hotseat) continue;
 
+    syncTurnClock(state, now);
+    if (turnExpired(state, now)) {
+      const anyoneOnline = humanPlayers(state).some((p) => p.connected);
+      // Быстрый таймер не гоняет партию по кругу, пока в ней никого нет; асинхронный — сжигает ход по дедлайну.
+      if (!anyoneOnline && state.settings.turnMinutes < ASYNC_TURN_MINUTES) {
+        pauseTurnClock(state, now);
+        markDirty(state.roomCode);
+      } else if (expireTurn(state)) {
+        pushStateSafe(state);
+        continue;
+      }
+    }
+
     const pending = state.pendingSquare;
     if (pending) {
       // Отсчёт привязан к конкретному предложению, а не к комнате: новое каре — новый таймер.
@@ -318,17 +445,24 @@ function sweep(): void {
     }
     squareSeenAt.delete(state.roomCode);
 
+    // В асинхронной партии офлайн — норма: ход сгорает только по дедлайну.
+    if (state.settings.turnMinutes >= ASYNC_TURN_MINUTES) continue;
+
     const current = currentPlayer(state);
     if (!current || current.connected) continue;
     const key = offlineKey(state.roomCode, current.id);
     const since = offlineSince.get(key) ?? now;
     if (!offlineSince.has(key)) offlineSince.set(key, since);
     if (now - since <= TURN_SKIP_OFFLINE_MS) continue;
-    const anotherOnline = state.players.some((p) => p.id !== current.id && p.alive && p.connected);
+    const anotherOnline = humanPlayers(state).some((p) => p.id !== current.id && p.alive && p.connected);
     if (!anotherOnline) continue;
     const result = applyAction(state, current.id, { type: 'endTurn' });
     if (result.ok) pushStateSafe(state);
   }
+  tickReminders(listRooms(), now, (code, userId) => {
+    const since = offlineSince.get(offlineKey(code, userId));
+    return since == null ? null : now - since;
+  });
 }
 
 setInterval(sweep, 10_000);

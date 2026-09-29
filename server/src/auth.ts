@@ -3,6 +3,8 @@ import crypto from 'node:crypto';
 export interface AuthUser {
   id: string;
   name: string;
+  /** Игрок разрешил боту писать ему в личку (allows_write_to_pm). */
+  allowsWrite?: boolean;
 }
 
 // initData снимается один раз при открытии Mini App и не обновляется (client/src/net.ts);
@@ -39,11 +41,17 @@ export function verifyInitData(initData: string, botToken: string): AuthUser | n
   const rawUser = params.get('user');
   if (!rawUser) return null;
   try {
-    const user = JSON.parse(rawUser) as { id: number; first_name?: string; username?: string };
+    const user = JSON.parse(rawUser) as {
+      id: number;
+      first_name?: string;
+      username?: string;
+      allows_write_to_pm?: boolean;
+    };
     if (!user?.id) return null;
     return {
       id: String(user.id),
       name: user.first_name || user.username || `Игрок ${user.id}`,
+      allowsWrite: user.allows_write_to_pm === true,
     };
   } catch {
     return null;
@@ -53,5 +61,6 @@ export function verifyInitData(initData: string, botToken: string): AuthUser | n
 /** Локальная отладка в обычном браузере, когда подписи Telegram нет. */
 export function devUser(rawId: string | undefined): AuthUser {
   const id = rawId && rawId.trim() ? rawId.trim() : `dev-${Math.floor(Math.random() * 10000)}`;
-  return { id, name: `Тест-${id}` };
+  // Тестовым игрокам «писать можно»: без бота уведомления уходят в консоль сервера.
+  return { id, name: `Тест-${id}`, allowsWrite: true };
 }

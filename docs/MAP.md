@@ -163,3 +163,7 @@ scripts/abuse.ts        кривые payload'ы против локальног�
 - **Новая настройка лобби**: `types.ts:85 GameSettings` → `config.ts defaultGameSettings` → `engine.ts sanitizeSettings` → UI в `Lobby.tsx`.
 - **Новая команда бота**: `bot.ts` (`bot.command(...)` + `setMyCommands`).
 - **Новое socket-событие**: `server/src/index.ts` в `io.on('connection')` + вызов `request(socket, 'event', payload)` в `App.tsx`.
+
+## Новые файлы (план функций 2026-09-29)
+
+`server/src/`: storage, users, notify, turnClock, rematch, aiRunner, hub. `shared/src/`: events, diplomacy, ai. `client/src/`: labels.ts; components — LogSheet, EndScreen, EventCard, DiplomacySheet, MiniMap, Tutorial. Номера строк выше могли сдвинуться в `engine.ts` — ищи по имени функции. Подробности — в конце `server.md`, `engine.md`, `client.md`.

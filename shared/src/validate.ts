@@ -5,6 +5,7 @@
 import { COMMANDER_IDS } from './commanders.js';
 import { UNIT_IDS } from './units.js';
 import type {
+  AiLevel,
   BuildingType,
   CommanderId,
   Coord,
@@ -13,6 +14,7 @@ import type {
   LobbyAction,
   TechType,
   TerrainType,
+  TreatyKind,
   UnitId,
 } from './types.js';
 
@@ -29,9 +31,16 @@ const GAME_ACTION_TYPES = [
   'formSquare',
   'breakSquare',
   'squareReply',
+  'eventChoice',
+  'propose',
+  'acceptProposal',
+  'declineProposal',
+  'breakTreaty',
   'endTurn',
 ] as const;
-const LOBBY_ACTION_TYPES = ['configure', 'paint', 'reroll', 'setAdmin'] as const;
+const LOBBY_ACTION_TYPES = ['configure', 'paint', 'reroll', 'setAdmin', 'addAi', 'removeAi'] as const;
+const AI_LEVELS: AiLevel[] = ['easy', 'normal', 'hard'];
+const TREATY_KINDS: TreatyKind[] = ['truce', 'alliance'];
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -43,6 +52,12 @@ function parseCoord(v: unknown): Coord | null {
   if (!Number.isInteger(x) || !Number.isInteger(y)) return null;
   if ((x as number) < 0 || (x as number) >= 64 || (y as number) < 0 || (y as number) >= 64) return null;
   return { x: x as number, y: y as number };
+}
+
+/** Идентификатор игрока/предложения: непустая короткая строка. */
+function parseId(v: unknown): string | null {
+  if (typeof v !== 'string' || v.length === 0 || v.length > 300) return null;
+  return v;
 }
 
 function parseCount(v: unknown): number | null {
@@ -137,6 +152,32 @@ export function parseGameAction(raw: unknown): GameAction | null {
       if (typeof raw.form !== 'boolean') return null;
       return { type: 'squareReply', form: raw.form };
     }
+    case 'eventChoice': {
+      if (raw.choice !== 0 && raw.choice !== 1) return null;
+      return { type: 'eventChoice', choice: raw.choice };
+    }
+    case 'propose': {
+      const to = parseId(raw.to);
+      const kind = raw.kind;
+      if (!to || typeof kind !== 'string' || !(TREATY_KINDS as string[]).includes(kind)) return null;
+      let rounds: number | undefined;
+      if (raw.rounds !== undefined) {
+        if (!Number.isInteger(raw.rounds) || (raw.rounds as number) < 1 || (raw.rounds as number) > 100) return null;
+        rounds = raw.rounds as number;
+      }
+      return { type: 'propose', to, kind: kind as TreatyKind, ...(rounds !== undefined ? { rounds } : {}) };
+    }
+    case 'acceptProposal':
+    case 'declineProposal': {
+      const id = parseId(raw.id);
+      if (!id) return null;
+      return { type: type as 'acceptProposal' | 'declineProposal', id };
+    }
+    case 'breakTreaty': {
+      const other = parseId(raw.with);
+      if (!other) return null;
+      return { type: 'breakTreaty', with: other };
+    }
     case 'endTurn':
       return { type: 'endTurn' };
     default:
@@ -168,6 +209,16 @@ export function parseLobbyAction(raw: unknown): LobbyAction | null {
       if (typeof playerId !== 'string' || playerId.length === 0 || playerId.length > 128) return null;
       if (typeof admin !== 'boolean') return null;
       return { type: 'setAdmin', playerId, admin };
+    }
+    case 'addAi': {
+      const difficulty = raw.difficulty;
+      if (typeof difficulty !== 'string' || !(AI_LEVELS as string[]).includes(difficulty)) return null;
+      return { type: 'addAi', difficulty: difficulty as AiLevel };
+    }
+    case 'removeAi': {
+      const playerId = parseId(raw.playerId);
+      if (!playerId) return null;
+      return { type: 'removeAi', playerId };
     }
     default:
       return null;

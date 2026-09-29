@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  atWar,
   BUILDINGS,
   COMMANDER_IDS,
   COMMANDERS,
@@ -57,7 +58,15 @@ import {
 } from '@tge/shared';
 import type { Army, BuildingType, CommanderId, Coord, EraId, GameAction, GameFx, GameState, Tile, UnitClass, UnitId } from '@tge/shared';
 import MapBoard from './MapBoard';
+import type { MapHandle } from './MapBoard';
+import MiniMap from './MiniMap';
 import TechModal from './TechModal';
+import LogSheet from './LogSheet';
+import EndScreen, { StatsSheet } from './EndScreen';
+import EventCard, { EffectChips } from './EventCard';
+import DiplomacySheet from './DiplomacySheet';
+import Tutorial from './Tutorial';
+import { leftLabel } from '../labels';
 import { haptic, hapticResult } from '../telegram';
 
 interface Props {
@@ -68,6 +77,36 @@ interface Props {
   notify: (message: string) => void;
   fx: GameFx | null;
   onExit: () => void;
+  onRematch: () => void;
+  /** Показать обучение поверх игры. */
+  tutorial?: boolean;
+  onTutorialDone?: () => void;
+}
+
+/** Секундный «тик» для обратного отсчёта; без дедлайна не тикает. */
+function useNow(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [active]);
+  return now;
+}
+
+const MINIMAP_KEY = 'tge-minimap';
+
+/** Мини-карта по умолчанию: на больших картах включена, на малых нет; выбор игрока запоминаем. */
+function initialMiniMap(mapSize: number): boolean {
+  try {
+    const saved = localStorage.getItem(MINIMAP_KEY);
+    if (saved === '1') return true;
+    if (saved === '0') return false;
+  } catch {
+    // Хранилище закрыто — берём значение по умолчанию.
+  }
+  return mapSize >= 12;
 }
 
 type Sheet = 'recruit' | 'build' | 'commander' | null;
@@ -244,7 +283,7 @@ function ArmyChips({ army, era }: { army: Army; era: EraId }) {
   );
 }
 
-export default function GameScreen({ state, meId, viewerId, act, notify, fx, onExit }: Props) {
+export default function GameScreen({ state, meId, viewerId, act, notify, fx, onExit, onRematch, tutorial, onTutorialDone }: Props) {
   const [selected, setSelected] = useState<Coord | null>(null);
   const [mode, setMode] = useState<PickMode>('none');
   const [moveFrom, setMoveFrom] = useState<Coord | null>(null);
@@ -256,6 +295,15 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
   const [recruitUnit, setRecruitUnit] = useState<UnitId>(DEFAULT_UNIT);
   const [sheet, setSheet] = useState<Sheet>(null);
   const [showTech, setShowTech] = useState(false);
+  const [showLog, setShowLog] = useState(false);
+  const [showStats, setShowStats] = useState(false);
+  const [showDip, setShowDip] = useState(false);
+  const [closedEvent, setClosedEvent] = useState('');
+  const [dismissedProposals, setDismissedProposals] = useState<string[]>([]);
+  const [showMini, setShowMini] = useState(() => initialMiniMap(state.settings.mapSize));
+  const mapRef = useRef<MapHandle>(null);
+  const stackCursor = useRef('');
+  const warnedTurn = useRef('');
 
   const me = state.players.find((p) => p.id === meId);
   const currentId = state.order[state.turnIndex];
@@ -286,7 +334,73 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
     setSheet(null);
     setSelected(null);
     setShowTech(false);
+    setShowLog(false);
+    setShowStats(false);
+    setShowDip(false);
   }, [meId]);
+
+  // Обратный отсчёт хода: сверяем часы с сервером (в состоянии лежит его время).
+  const deadline = state.phase === 'playing' ? state.turnDeadline ?? null : null;
+  const now = useNow(deadline != null);
+  const skew = useMemo(() => (state.serverNow ? state.serverNow - Date.now() : 0), [state.serverNow]);
+  const turnTotal = state.settings.turnMinutes * 60_000;
+  const timeLeft = deadline != null ? Math.max(0, deadline - (now + skew)) : null;
+  const urgent = timeLeft != null && turnTotal > 0 && timeLeft <= turnTotal * 0.2;
+
+  // Последние 20% времени — красным и один раз вибрация.
+  useEffect(() => {
+    if (!isMyTurn || !urgent) return;
+    const key = `${state.round}:${state.turnIndex}`;
+    if (warnedTurn.current === key) return;
+    warnedTurn.current = key;
+    hapticResult('warning');
+  }, [isMyTurn, urgent, state.round, state.turnIndex]);
+
+  // Событие этого хода и входящее предложение договора.
+  const myEvent = me?.event && me.event.round === state.round ? me.event : null;
+  const eventKey = myEvent ? `${state.round}:${myEvent.id}` : '';
+  const showEventCard = state.phase === 'playing' && isMyTurn && myEvent != null && closedEvent !== eventKey;
+  const incomingProposals = state.phase === 'playing' ? state.proposals.filter((p) => p.to === meId) : [];
+  const incomingCard =
+    !showEventCard && !showDip
+      ? incomingProposals.find((p) => !dismissedProposals.includes(`${p.id}:${p.round}`))
+      : undefined;
+
+  const toggleMini = () => {
+    const next = !showMini;
+    setShowMini(next);
+    try {
+      localStorage.setItem(MINIMAP_KEY, next ? '1' : '0');
+    } catch {
+      // Хранилище закрыто — выбор не запомнится, не страшно.
+    }
+  };
+
+  const goCapital = () => {
+    const capital = state.tiles.find((t) => t.capitalOf === meId);
+    if (!capital) {
+      notify('Столицы больше нет');
+      return;
+    }
+    mapRef.current?.centerOn(capital.x, capital.y, true);
+    setSelected({ x: capital.x, y: capital.y });
+  };
+
+  /** К следующему своему стеку с запасом хода — по кругу. */
+  const goNextStack = () => {
+    const stacks = state.tiles
+      .filter((t) => t.ownerId === meId && armyCount(t.army) > 0 && t.routedTurns === 0 && mobileCount(ensureWings(t)) > 0)
+      .sort((a, b) => a.y - b.y || a.x - b.x);
+    if (stacks.length === 0) {
+      notify('Нет войск с запасом хода');
+      return;
+    }
+    const idx = stacks.findIndex((t) => coordKey(t) === stackCursor.current);
+    const next = stacks[(idx + 1) % stacks.length]!;
+    stackCursor.current = coordKey(next);
+    mapRef.current?.centerOn(next.x, next.y, true);
+    setSelected({ x: next.x, y: next.y });
+  };
 
   const selectedTile = selected ? tileAt(state, selected.x, selected.y) : null;
   const fromTile = moveFrom ? tileAt(state, moveFrom.x, moveFrom.y) : null;
@@ -356,6 +470,7 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
         for (const tile of state.tiles) {
           if (hexDistance(fromTile, tile) !== 2) continue;
           if (tile.ownerId === meId) continue;
+          if (tile.ownerId && !atWar(state, meId, tile.ownerId)) continue;
           if (armyCount(tile.army) < 1) continue;
           if (tile.terrain === 'forest') continue;
           if (!TERRAIN[tile.terrain].passable) continue;
@@ -372,6 +487,7 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
       const dist = hexDistance(fromTile, tile);
       if (dist < 1 || dist > range) continue;
       if (tile.ownerId === meId) continue;
+      if (tile.ownerId && !atWar(state, meId, tile.ownerId)) continue;
       if (armyCount(tile.army) < 1) continue;
       move.add(coordKey(tile));
     }
@@ -505,7 +621,7 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
       <header className="topbar">
         <div className="topbar-row">
           <span className="round">
-            Раунд {state.round}/{state.maxRounds}
+            Раунд {Math.min(state.round, state.maxRounds)}/{state.maxRounds}
             {hotseat ? ' · сам с собой' : ''}
             {` · ${eraInfo.icon} ${eraInfo.name}`}
           </span>
@@ -514,31 +630,72 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
             {hotseat ? `Ход: ${current?.name ?? '—'}` : isMyTurn ? 'Ваш ход' : `Ходит ${current?.name ?? '—'}`}
           </span>
         </div>
-        <div className="resources">
+        <div className="resources" data-tour="resources">
           <span title="Золото">🪙 {me.resources.gold}{income ? <i className="delta"> +{income.gold}</i> : null}</span>
           <span title="Еда">🌾 {me.resources.food}
             {income ? <i className={income.food - upkeep >= 0 ? 'delta' : 'delta neg'}> {income.food - upkeep >= 0 ? '+' : ''}{income.food - upkeep}</i> : null}
           </span>
           <span title="Железо">🔩 {me.resources.iron}{income ? <i className="delta"> +{income.iron}</i> : null}</span>
-          <span title="Действия" className="actions-left">⚡ {isMyTurn ? me.actionsLeft : '—'}</span>
+          <span title="Действия" className="actions-left" data-tour="actions">⚡ {isMyTurn ? me.actionsLeft : '—'}</span>
         </div>
+        <EffectChips me={me} />
+        {state.phase === 'playing' && (
+          <div className="topbar-tools">
+            {timeLeft != null && (
+              <span className={`turn-timer${urgent ? ' urgent' : ''}`} title="Время на ход">
+                ⏱ {leftLabel(timeLeft)}
+              </span>
+            )}
+            <span className="grow" />
+            {isMyTurn && myEvent?.pending && closedEvent === eventKey && (
+              <button className="btn tiny" onClick={() => setClosedEvent('')}>
+                🎲 Решить
+              </button>
+            )}
+            {state.settings.diplomacy && !hotseat && (
+              <button className="btn tiny" data-tour="dip" onClick={() => setShowDip(true)} title="Дипломатия">
+                🤝{incomingProposals.length > 0 ? ' ●' : ''}
+              </button>
+            )}
+            <button className="btn tiny" onClick={() => setShowStats(true)} title="Статистика">
+              📈
+            </button>
+          </div>
+        )}
       </header>
 
-      <MapBoard
-        state={state}
-        meId={meId}
-        selected={selected}
-        highlighted={highlighted}
-        chargeHighlighted={chargeHighlighted}
-        supportHighlighted={new Set(selectedAllies.map((tile) => coordKey(tile)))}
-        highlightKind={mode === 'shoot' ? 'shoot' : 'move'}
-        fx={fx}
-        onPick={pick}
-      />
+      <div className="map-wrap" data-tour="map">
+        <MapBoard
+          ref={mapRef}
+          state={state}
+          meId={meId}
+          selected={selected}
+          highlighted={highlighted}
+          chargeHighlighted={chargeHighlighted}
+          supportHighlighted={new Set(selectedAllies.map((tile) => coordKey(tile)))}
+          highlightKind={mode === 'shoot' ? 'shoot' : 'move'}
+          fx={fx}
+          onPick={pick}
+        />
+        <div className="map-tools">
+          <button type="button" className={`map-btn${showMini ? ' on' : ''}`} onClick={toggleMini} title="Мини-карта" data-tour="mini">
+            🗺
+          </button>
+          <button type="button" className="map-btn" onClick={goCapital} title="К столице">
+            🏰
+          </button>
+          {state.phase === 'playing' && (
+            <button type="button" className="map-btn" onClick={goNextStack} title="К следующему отряду с ходом">
+              ⚔️
+            </button>
+          )}
+        </div>
+        {showMini && <MiniMap state={state} meId={meId} mapRef={mapRef} />}
+      </div>
 
       {state.phase !== 'finished' && (
         <>
-      <div className="panel">
+      <div className="panel" data-tour="panel">
         {targetTile && fromTile && mode === 'move' ? (
           <div className="move-panel">
             <div className="panel-title">
@@ -739,7 +896,7 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
         )}
       </div>
 
-      <div className="log">
+      <div className="log" onClick={() => setShowLog(true)}>
         {state.log.slice(-1).map((entry, i) => (
           <div key={i} className="log-line">
             <b>{entry.round}</b> {entry.text}
@@ -748,10 +905,13 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
       </div>
 
       <footer className="bottombar">
-        <button className="btn" onClick={() => setShowTech(true)}>
+        <button className="btn" onClick={() => setShowLog(true)} title="Журнал">
+          📜
+        </button>
+        <button className="btn" data-tour="tech" onClick={() => setShowTech(true)}>
           🔬 Технологии
         </button>
-        <button className="btn primary grow" disabled={!isMyTurn || Boolean(pendingSquare)} onClick={() => run({ type: 'endTurn' })}>
+        <button className="btn primary grow" data-tour="end" disabled={!isMyTurn || Boolean(pendingSquare)} onClick={() => run({ type: 'endTurn' })}>
           Завершить ход
         </button>
       </footer>
@@ -817,6 +977,67 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
         />
       )}
 
+      {showLog && (
+        <LogSheet
+          log={state.log}
+          onPick={(at) => {
+            setSelected({ x: at.x, y: at.y });
+            mapRef.current?.centerOn(at.x, at.y, true);
+          }}
+          onClose={() => setShowLog(false)}
+        />
+      )}
+
+      {showStats && <StatsSheet state={state} me={me} onClose={() => setShowStats(false)} />}
+
+      {showDip && <DiplomacySheet state={state} meId={meId} act={act} onClose={() => setShowDip(false)} />}
+
+      {showEventCard && (
+        <EventCard
+          state={state}
+          me={me}
+          onClose={() => setClosedEvent(eventKey)}
+          onChoice={(choice) => {
+            void run({ type: 'eventChoice', choice }).then((result) => {
+              if (!result.ok) return;
+              setClosedEvent(eventKey);
+              const detail = result.state?.players.find((p) => p.id === meId)?.event?.detail;
+              if (detail) notify(detail);
+            });
+          }}
+        />
+      )}
+
+      {incomingCard && (
+        <div className="overlay center">
+          <div className="overlay-card">
+            <div className="hero-icon">🤝</div>
+            <h2>Предложение договора</h2>
+            <p>
+              Держава <b>{state.players.find((p) => p.id === incomingCard.from)?.name ?? '—'}</b> предлагает{' '}
+              {incomingCard.kind === 'truce' ? `перемирие на ${incomingCard.rounds ?? 3} раундов` : 'союз'}.
+            </p>
+            <div className="row" style={{ marginTop: 12 }}>
+              <button
+                className="btn primary grow"
+                onClick={() => void run({ type: 'acceptProposal', id: incomingCard.id })}
+              >
+                Принять
+              </button>
+              <button className="btn grow" onClick={() => void run({ type: 'declineProposal', id: incomingCard.id })}>
+                Отклонить
+              </button>
+            </div>
+            <button
+              className="btn tiny event-later"
+              onClick={() => setDismissedProposals((cur) => [...cur, `${incomingCard.id}:${incomingCard.round}`])}
+            >
+              Позже
+            </button>
+          </div>
+        </div>
+      )}
+
       {showTech && (
         <TechModal
           era={era}
@@ -855,18 +1076,13 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
         </div>
       )}
 
+      {tutorial && state.phase === 'playing' && !hotseat && onTutorialDone && (
+        <Tutorial settings={state.settings} onDone={onTutorialDone} />
+      )}
+
       {state.phase === 'finished' && (
-        <div className="overlay center">
-          <div className="overlay-card victory">
-            {/* В соло meId — тот, чей был ход, поэтому «Победа!» там не показываем, только имя. */}
-            <div className="hero-icon">{!hotseat && state.winnerId === meId ? '👑' : '🏳️'}</div>
-            <h2>{!hotseat && state.winnerId === meId ? 'Победа!' : `Победил ${state.players.find((p) => p.id === state.winnerId)?.name ?? '—'}`}</h2>
-            <p className="muted">Партия {state.roomCode} · раунд {state.round}</p>
-            <button className="btn primary" onClick={onExit}>
-              В меню
-            </button>
-          </div>
-        </div>
+        // В соло meId — тот, чей был ход, поэтому «Победа!» там не показываем, только имя.
+        <EndScreen state={state} meId={meId} viewerId={viewerId} hotseat={hotseat} onExit={onExit} onRematch={onRematch} />
       )}
     </div>
   );

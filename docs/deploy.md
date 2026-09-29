@@ -66,3 +66,7 @@ npm run abuse        # scripts/abuse.ts — кривые payload'ы против
 
 - `openspec/` + `.cursor/` — заготовки OpenSpec/Cursor, спецификаций пока нет.
 - Монорепо на npm workspaces: `shared`, `server`, `client`. TS-конфиг общий — `tsconfig.base.json`.
+
+## Данные на диске
+
+`DATA_DIR` (по умолчанию `<root>/data`): `rooms.json`, `users.json`. Каталог `data/` на проде не затирать при копировании (он в `.gitignore`). Часовой пояс сообщений — `NOTIFY_TZ` (по умолчанию Europe/Moscow). Локально запускать с `BOT_TOKEN=`, чтобы не конфликтовать с прод-ботом.

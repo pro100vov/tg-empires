@@ -20,6 +20,17 @@ export function connect(): Socket {
   });
 }
 
+/** Запрос с произвольным ответом (не состояние партии): «Мои партии» и т. п. */
+export function call<T>(socket: Socket, event: string, payload: unknown): Promise<T | null> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => resolve(null), 8000);
+    socket.emit(event, payload, (response: T) => {
+      clearTimeout(timeout);
+      resolve(response);
+    });
+  });
+}
+
 export function request(socket: Socket, event: string, payload: unknown): Promise<AckResponse> {
   return new Promise((resolve) => {
     const timeout = setTimeout(() => resolve({ ok: false, error: 'Сервер не ответил' }), 8000);

@@ -1518,6 +1518,41 @@ input[type='range'] {
   margin-right: 4px;
 }
 
+.log {
+  cursor: pointer;
+}
+
+.log-list {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 8px;
+}
+
+.log-item {
+  font-size: 13px;
+  color: var(--hint);
+  text-align: left;
+  padding: 6px 0;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: none;
+  font-family: inherit;
+}
+
+.log-item b {
+  color: var(--text);
+  margin-right: 4px;
+}
+
+.log-item-at {
+  cursor: pointer;
+  color: var(--text);
+}
+
+.log-pin {
+  opacity: 0.7;
+}
+
 .bottombar {
   position: fixed;
   left: 50%;
@@ -1653,4 +1688,468 @@ input[type='range'] {
   to {
     transform: rotate(360deg);
   }
+}
+
+/* ── Новые функции: мои партии, ИИ, итоги, таймер, события, дипломатия, мини-карта ── */
+
+.left {
+  text-align: left;
+}
+
+.my-games {
+  background: var(--secondary-bg);
+  border-radius: var(--radius);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.my-game {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.my-game-code {
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.my-game-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.badge-turn {
+  font-size: 11px;
+  font-weight: 700;
+  color: #17212b;
+  background: #ffd166;
+  border-radius: 6px;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+
+.solo-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}
+
+.ai-add {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+}
+
+/* Верхняя панель: таймер, инструменты, эффекты */
+.topbar-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.turn-timer {
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--hint);
+}
+
+.turn-timer.urgent {
+  color: #ff6b6b;
+  animation: timer-pulse 1s ease-in-out infinite;
+}
+
+@keyframes timer-pulse {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+.effect-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.effect-chip {
+  font-size: 11px;
+  border-radius: 6px;
+  padding: 1px 6px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.effect-chip.good {
+  background: rgba(87, 204, 153, 0.22);
+}
+
+.effect-chip.bad {
+  background: rgba(224, 82, 99, 0.25);
+}
+
+/* Карта: обёртка, кнопки, мини-карта */
+.map-wrap {
+  position: relative;
+  min-height: 0;
+  height: 100%;
+}
+
+.map-tools {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 5;
+}
+
+.map-btn {
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(20, 28, 38, 0.78);
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+}
+
+.map-btn.on {
+  outline: 2px solid var(--accent);
+}
+
+.minimap {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  z-index: 5;
+  background: rgba(10, 16, 24, 0.78);
+  border-radius: 8px;
+  padding: 3px;
+  box-sizing: content-box;
+  touch-action: none;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+}
+
+.minimap svg {
+  display: block;
+  touch-action: none;
+}
+
+.minimap-frame {
+  fill: rgba(255, 255, 255, 0.08);
+  stroke: #fff;
+  stroke-width: 1.2;
+  pointer-events: none;
+}
+
+.minimap-star {
+  font-size: 7px;
+  fill: #ffe08a;
+  stroke: #000;
+  stroke-width: 0.3;
+  pointer-events: none;
+}
+
+/* Союзники и перемирие: полосатое кольцо клетки */
+.tile.ally .tile-ring {
+  background-image: repeating-linear-gradient(45deg, transparent 0 4px, rgba(0, 0, 0, 0.75) 4px 7px) !important;
+}
+
+.tile.truce .tile-ring {
+  background-image: repeating-linear-gradient(45deg, transparent 0 2px, rgba(0, 0, 0, 0.6) 2px 8px) !important;
+}
+
+/* Экран итогов */
+.end-screen {
+  align-items: center;
+  padding-bottom: 12px;
+}
+
+.overlay-card.end-card {
+  max-width: 480px;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.end-card h2 {
+  margin: 0;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 3px;
+}
+
+.tab {
+  flex: 1;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--hint);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 7px 4px;
+  cursor: pointer;
+}
+
+.tab.selected {
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.end-body {
+  flex: 1;
+  min-height: 160px;
+  overflow-y: auto;
+  text-align: left;
+}
+
+.end-actions {
+  margin-top: 4px;
+}
+
+.results {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.result-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.result-place {
+  width: 18px;
+  font-weight: 700;
+  color: var(--hint);
+}
+
+.result-score {
+  font-variant-numeric: tabular-nums;
+  color: var(--hint);
+  font-size: 13px;
+}
+
+.history-chart {
+  width: 100%;
+  height: auto;
+  display: block;
+  margin-top: 6px;
+}
+
+.chart-grid {
+  stroke: rgba(255, 255, 255, 0.12);
+  stroke-width: 0.6;
+}
+
+.chart-label {
+  font-size: 8px;
+  fill: var(--hint);
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.chart-legend-item b {
+  margin-left: 2px;
+}
+
+.stat-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bar-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  margin-top: 3px;
+}
+
+.bar-name {
+  width: 72px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-track {
+  flex: 1;
+  height: 10px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 5px;
+  min-width: 2px;
+}
+
+.bar-value {
+  width: 34px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.records {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.record-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.record-icon {
+  font-size: 22px;
+}
+
+.record-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+/* События и договоры */
+.event-card .event-detail {
+  font-weight: 600;
+}
+
+.event-card.event-good {
+  border-top: 3px solid #57cc99;
+}
+
+.event-card.event-bad {
+  border-top: 3px solid #e05263;
+}
+
+.event-card.event-mixed {
+  border-top: 3px solid #ffd166;
+}
+
+.event-later {
+  margin-top: 10px;
+}
+
+.dip-row {
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  text-align: left;
+}
+
+.dip-actions {
+  margin-top: 6px;
+}
+
+.dip-incoming {
+  background: rgba(255, 209, 102, 0.12);
+  border-radius: 10px;
+  padding: 8px;
+  margin-bottom: 8px;
+  text-align: left;
+}
+
+/* Обучение */
+.tour {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+}
+
+.tour-blocker {
+  position: absolute;
+  inset: 0;
+}
+
+.tour-dim {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.tour-hole {
+  position: absolute;
+  border-radius: 12px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.72);
+  outline: 2px solid #ffd166;
+  pointer-events: none;
+  transition: all 0.2s ease;
+}
+
+.tour-card {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  max-width: 460px;
+  margin: 0 auto;
+  background: #1c2733;
+  border-radius: 16px;
+  padding: 14px 16px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+}
+
+.tour-card h3 {
+  margin: 0 0 6px;
+}
+
+.tour-card p {
+  margin: 0 0 12px;
+  line-height: 1.4;
+}
+
+.tour-progress {
+  float: right;
+  font-size: 12px;
+  color: var(--hint);
+}
+
+.screen.game {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.map-wrap {
+  min-width: 0;
 }

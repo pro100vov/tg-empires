@@ -1,17 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 import { actingPlayerId } from '@tge/shared';
-import type { GameAction, GameFx, GameState, LobbyAction } from '@tge/shared';
-import { connect, request } from './net';
-import { hapticResult, roomCodeFromEnvironment } from './telegram';
+import type { GameAction, GameFx, GameState, LobbyAction, MyGame } from '@tge/shared';
+import { call, connect, request } from './net';
+import { hapticResult, loadFlag, requestWriteAccess, roomCodeFromEnvironment, saveFlag } from './telegram';
 import Lobby from './components/Lobby';
+import type { SoloOptions } from './components/Lobby';
 import GameScreen from './components/GameScreen';
 import Toast from './components/Toast';
 
 interface Me {
   id: string;
   name: string;
+  /** Бот может писать игроку в личку (уведомления о ходе). */
+  canNotify?: boolean;
 }
+
+/** Флаг «обучение пройдено»: в CloudStorage Telegram (общий для устройств), запасной — localStorage. */
+const TUTORIAL_KEY = 'tge-tutorial-done';
 
 /** Ключ последней комнаты в localStorage — свой на каждого пользователя (dev-вкладки не мешают друг другу). */
 function lastRoomKey(userId: string): string {
@@ -27,6 +33,19 @@ export default function App() {
   const [fatal, setFatal] = useState('');
   const [fx, setFx] = useState<GameFx | null>(null);
   const fxSeqRef = useRef(0);
+  // null — ещё читаем флаг; false — новичок: обучение покажется в первой партии.
+  const [tutorialDone, setTutorialDone] = useState<boolean | null>(null);
+  const [forceTutorial, setForceTutorial] = useState(false);
+
+  useEffect(() => {
+    void loadFlag(TUTORIAL_KEY).then((value) => setTutorialDone(value === '1'));
+  }, []);
+
+  const finishTutorial = useCallback(() => {
+    setForceTutorial(false);
+    setTutorialDone(true);
+    saveFlag(TUTORIAL_KEY, '1');
+  }, []);
 
   // Код комнаты и id пользователя держим в ref: они нужны обработчикам socket,
   // которые регистрируются один раз и переживают разрывы связи и перезапуски сервера.
@@ -148,13 +167,63 @@ export default function App() {
     else setToast(response.error);
   }, [applyState]);
 
-  const createSolo = useCallback(async () => {
+  const createSolo = useCallback(
+    async (options?: SoloOptions) => {
+      const socket = socketRef.current;
+      if (!socket) return;
+      const response = await request(socket, 'room:solo', options?.ai ? { ai: options.ai, tutorial: options.tutorial } : {});
+      if (response.ok) applyState(response.state);
+      else setToast(response.error);
+    },
+    [applyState],
+  );
+
+  /** Учебная партия: карта 8, один лёгкий ИИ, без событий; обучение включено. */
+  const startTutorialGame = useCallback(async () => {
+    setForceTutorial(true);
+    await createSolo({ ai: ['easy'], tutorial: true });
+  }, [createSolo]);
+
+  const replayTutorial = useCallback(() => {
+    setForceTutorial(true);
+    setToast('Обучение покажется в начале партии');
+  }, []);
+
+  const fetchMine = useCallback(async (): Promise<MyGame[]> => {
+    const socket = socketRef.current;
+    if (!socket) return [];
+    const response = await call<{ ok: boolean; games?: MyGame[] }>(socket, 'room:mine', {});
+    return response?.ok && response.games ? response.games : [];
+  }, []);
+
+  const rematch = useCallback(async () => {
     const socket = socketRef.current;
     if (!socket) return;
-    const response = await request(socket, 'room:solo', {});
+    const response = await request(socket, 'room:rematch', {});
     if (response.ok) applyState(response.state);
     else setToast(response.error);
   }, [applyState]);
+
+  // Просим разрешение на сообщения бота один раз за всё время — в первой же партии.
+  const askedWrite = useRef(false);
+  useEffect(() => {
+    if (!me || !state || me.canNotify !== false || askedWrite.current) return;
+    askedWrite.current = true;
+    const key = `tge-write-asked:${me.id}`;
+    try {
+      if (localStorage.getItem(key)) return;
+      localStorage.setItem(key, '1');
+    } catch {
+      // Без localStorage спросим ещё раз в следующий заход — не страшно.
+    }
+    void requestWriteAccess().then((allowed) => {
+      const socket = socketRef.current;
+      if (allowed && socket) {
+        socket.emit('user:write', {});
+        setMe((cur) => (cur ? { ...cur, canNotify: true } : cur));
+      }
+    });
+  }, [me, state]);
 
   const startGame = useCallback(async () => {
     const socket = socketRef.current;
@@ -255,6 +324,9 @@ export default function App() {
           me={me}
           onCreate={createRoom}
           onSolo={createSolo}
+          onMine={fetchMine}
+          onTutorial={startTutorialGame}
+          onHelp={replayTutorial}
           onJoin={joinRoom}
           onStart={startGame}
           onLobby={lobbyAct}
@@ -269,6 +341,9 @@ export default function App() {
           notify={setToast}
           fx={fx}
           onExit={leaveRoom}
+          onRematch={rematch}
+          tutorial={forceTutorial || tutorialDone === false}
+          onTutorialDone={finishTutorial}
         />
       )}
       <Toast message={toast} onHide={() => setToast('')} />

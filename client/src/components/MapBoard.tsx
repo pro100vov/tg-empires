@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, type CSSProperties } from 'react';
+import { forwardRef, useCallback, useImperativeHandle, useLayoutEffect, useRef, type CSSProperties } from 'react';
 import {
   MIN_PLAYERS,
   TERRAIN,
@@ -14,11 +14,21 @@ import {
   dominantUnit,
   hexBoardSize,
   hexTileBox,
+  relationOf,
   takeArmy,
   unitShotKind,
   wingMoveRange,
 } from '@tge/shared';
 import type { Coord, GameFx, GameState, ShotKind, Tile } from '@tge/shared';
+
+/** Управление картой снаружи: центрирование и доступ к прокручиваемой области (мини-карта). */
+export interface MapHandle {
+  /** Центрирует карту на клетке. */
+  centerOn: (x: number, y: number, smooth?: boolean) => void;
+  /** Центрирует карту на точке в пикселях доски. */
+  centerOnPoint: (px: number, py: number, smooth?: boolean) => void;
+  viewport: () => HTMLDivElement | null;
+}
 
 interface Props {
   state: GameState;
@@ -40,10 +50,6 @@ const TERRAIN_ICON: Record<string, string> = {
   water: '🌊',
 };
 
-function tileSelector(x: number, y: number): string {
-  return `.tile[data-x="${x}"][data-y="${y}"]`;
-}
-
 function ShootBurst({ kind }: { kind: ShotKind }) {
   const fly = kind === 'cannon' ? '●' : kind === 'musket' ? '•' : '➤';
   const impact = kind === 'cannon' ? '💥' : kind === 'musket' ? '✴️' : '💥';
@@ -64,10 +70,41 @@ function ShootBurst({ kind }: { kind: ShotKind }) {
   );
 }
 
-export default function MapBoard({ state, meId, selected, highlighted, chargeHighlighted, supportHighlighted, highlightKind = 'move', fx, onPick }: Props) {
+const MapBoard = forwardRef<MapHandle, Props>(function MapBoard(
+  { state, meId, selected, highlighted, chargeHighlighted, supportHighlighted, highlightKind = 'move', fx, onPick },
+  ref,
+) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const centeredKey = useRef<string | null>(null);
   const board = hexBoardSize(state.width, state.height);
+
+  /** Прокручивает так, чтобы точка доски (px) оказалась в центре видимой области. */
+  const centerOnPoint = useCallback((px: number, py: number, smooth = false) => {
+    const viewport = viewportRef.current;
+    const boardEl = viewport?.querySelector('.board');
+    if (!viewport || !(boardEl instanceof HTMLElement)) return;
+    const viewRect = viewport.getBoundingClientRect();
+    const boardRect = boardEl.getBoundingClientRect();
+    if (viewRect.width < 8 || viewRect.height < 8) return;
+    // Начало доски в координатах прокрутки — не зависит от отступов и центрирования.
+    const originX = boardRect.left - viewRect.left + viewport.scrollLeft;
+    const originY = boardRect.top - viewRect.top + viewport.scrollTop;
+    viewport.scrollTo({
+      left: originX + px - viewRect.width / 2,
+      top: originY + py - viewRect.height / 2,
+      behavior: smooth ? 'smooth' : 'auto',
+    });
+  }, []);
+
+  const centerOn = useCallback(
+    (x: number, y: number, smooth = false) => {
+      const box = hexTileBox(x, y);
+      centerOnPoint(box.left + box.width / 2, box.top + box.height / 2, smooth);
+    },
+    [centerOnPoint],
+  );
+
+  useImperativeHandle(ref, () => ({ centerOn, centerOnPoint, viewport: () => viewportRef.current }), [centerOn, centerOnPoint]);
 
   useLayoutEffect(() => {
     const key = `${state.roomCode}:${meId}:${state.width}x${state.height}`;
@@ -81,17 +118,11 @@ export default function MapBoard({ state, meId, selected, highlighted, chargeHig
       state.tiles.find((tile) => tile.capitalOf === meId) ??
       state.tiles.find((tile) => tile.x === spot.x && tile.y === spot.y);
     if (!capital) return;
-    const tileEl = viewport.querySelector(tileSelector(capital.x, capital.y));
-    if (!(tileEl instanceof HTMLElement)) return;
-
-    const tileRect = tileEl.getBoundingClientRect();
     const viewRect = viewport.getBoundingClientRect();
     if (viewRect.width < 8 || viewRect.height < 8) return;
-
-    viewport.scrollLeft += tileRect.left - viewRect.left - viewRect.width / 2 + tileRect.width / 2;
-    viewport.scrollTop += tileRect.top - viewRect.top - viewRect.height / 2 + tileRect.height / 2;
+    centerOn(capital.x, capital.y);
     centeredKey.current = key;
-  }, [state.roomCode, state.width, state.height, state.tiles, meId]);
+  }, [state.roomCode, state.width, state.height, state.tiles, meId, centerOn]);
 
   const fromBox = fx ? hexTileBox(fx.from.x, fx.from.y) : null;
   const toBox = fx ? hexTileBox(fx.to.x, fx.to.y) : null;
@@ -166,6 +197,11 @@ export default function MapBoard({ state, meId, selected, highlighted, chargeHig
             if (tile.square) classes.push('in-square');
             if (tile.commander) classes.push('has-commander');
             if (owner?.id === meId) classes.push('mine');
+            if (owner && owner.id !== meId && state.phase === 'playing') {
+              const treaty = relationOf(state, meId, owner.id)?.kind;
+              if (treaty === 'alliance') classes.push('ally');
+              else if (treaty === 'truce') classes.push('truce');
+            }
             if (tile.building) classes.push('has-building');
             if (tile.construction) classes.push('has-construction');
             if (lobbyCapitals?.has(key)) classes.push('capital-spot');
@@ -282,4 +318,6 @@ export default function MapBoard({ state, meId, selected, highlighted, chargeHig
       </div>
     </div>
   );
-}
+});
+
+export default MapBoard;

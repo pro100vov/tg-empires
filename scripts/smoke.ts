@@ -66,8 +66,22 @@ import {
   publicView,
   markDisconnected,
   removePlayer,
+  normalizeState,
+  EVENT_DEFS,
+  addAiPlayer,
+  humanPlayers,
+  planAiDiplomacy,
+  planAiTurn,
+  stepAi,
+  attackMultiplier,
+  emptyStats,
+  pickEvent,
+  relationOf,
+  startEvent,
+  techCost,
+  techCostFor,
 } from '../shared/src/index.js';
-import type { GameState, Tile } from '../shared/src/index.js';
+import type { AiLevel, EventContext, GameState, Tile } from '../shared/src/index.js';
 
 function capitalOf(state: GameState, playerId: string): Tile {
   const tile = state.tiles.find((t) => t.capitalOf === playerId);
@@ -2058,6 +2072,828 @@ function checkShootNeedsVision(): void {
   console.log('✓ залп только по видимой цели');
 }
 
+
+function newGameN(n: number, seed = 12345): GameState {
+  const state = createGame('TEST1', 'p1', seed);
+  for (let i = 1; i <= n; i++) addPlayer(state, `p${i}`, `Игрок ${i}`);
+  const started = startGame(state, 'p1');
+  assert.ok(started.ok, 'игра должна стартовать');
+  return state;
+}
+
+function logTexts(state: GameState, viewerId: string): string[] {
+  return publicView(state, viewerId).log.map((e) => e.text);
+}
+
+function checkLogFogRecruit(): void {
+  const state = newGame();
+  const a = currentPlayer(state)!;
+  const b = state.players.find((p) => p.id !== a.id)!;
+  const cap = capitalOf(state, a.id);
+  a.resources = { gold: 500, food: 500, iron: 500 };
+  const res = applyAction(state, a.id, { type: 'recruit', at: cap, count: 2, unit: 'heavy_cavalry' });
+  assert.ok(res.ok);
+  assert.equal(canWatchTile(state, b.id, cap), false, 'столица A вне обзора B');
+  assert.ok(logTexts(state, a.id).some((t) => t.includes('нанимает')), 'у A запись о найме есть');
+  assert.equal(logTexts(state, b.id).some((t) => t.includes('нанимает')), false, 'B не видит чужой найм в тумане');
+  const seen = publicView(state, a.id).log.find((e) => e.text.includes('нанимает'));
+  assert.deepEqual(seen?.at, { x: cap.x, y: cap.y }, 'у записи есть клетка для центрирования');
+
+  // Свидетель рядом со столицей A видит найм.
+  const near = neighbors(state, cap).find((t) => TERRAIN[t.terrain].passable)!;
+  near.ownerId = b.id;
+  near.army = { medium_infantry: 1 };
+  const res2 = applyAction(state, a.id, { type: 'recruit', at: cap, count: 1, unit: 'light_infantry' });
+  assert.ok(res2.ok);
+  const last = publicView(state, b.id).log.filter((e) => e.text.includes('нанимает'));
+  assert.equal(last.length, 1, 'сосед видит только найм, случившийся на его глазах');
+  console.log('✓ журнал: чужой найм в тумане скрыт');
+}
+
+function checkLogFogResearch(): void {
+  const state = newGameN(3);
+  const a = currentPlayer(state)!;
+  a.resources = { gold: 500, food: 500, iron: 500 };
+  const res = applyAction(state, a.id, { type: 'research', tech: 'attack' });
+  assert.ok(res.ok);
+  assert.ok(logTexts(state, a.id).some((t) => t.includes('изучает')));
+  for (const other of state.players.filter((p) => p.id !== a.id)) {
+    assert.equal(logTexts(state, other.id).some((t) => t.includes('изучает')), false, 'изучение техи видит только автор');
+  }
+  const seen = maskStateFor(state, state.players.find((p) => p.id !== a.id)!.id);
+  assert.deepEqual(seen.players.find((p) => p.id === a.id)!.tech, { attack: 0, defense: 0, economy: 0, logistics: 0 }, 'чужие техи скрыты');
+  assert.equal(maskStateFor(state, a.id).players.find((p) => p.id === a.id)!.tech.attack, 1, 'свои техи видны');
+  console.log('✓ журнал: изучение техи видит только автор');
+}
+
+function checkLogFogBattle(): void {
+  const state = newGameN(3);
+  const a = currentPlayer(state)!;
+  const others = state.players.filter((p) => p.id !== a.id);
+  const cap = capitalOf(state, a.id);
+  const victimTile = neighbors(state, cap).find((t) => TERRAIN[t.terrain].passable)!;
+  const b = others[0]!;
+  victimTile.ownerId = b.id;
+  victimTile.terrain = 'plains';
+  victimTile.army = { light_infantry: 1 };
+  const c = others[1]!;
+  assert.equal(canWatchTile(state, c.id, victimTile), false, 'C не видит поле боя');
+  assert.equal(canWatchTile(state, c.id, cap), false, 'C не видит столицу A');
+  cap.terrain = 'plains';
+  const res = applyAction(state, a.id, {
+    type: 'move',
+    from: { x: cap.x, y: cap.y },
+    to: { x: victimTile.x, y: victimTile.y },
+    count: armyCount(cap.army),
+  });
+  assert.ok(res.ok, 'атака проходит');
+  const isBattle = (t: string) => t.startsWith('Бой');
+  assert.ok(logTexts(state, a.id).some(isBattle), 'атакующий видит бой');
+  assert.ok(logTexts(state, b.id).some(isBattle), 'обороняющийся видит бой');
+  assert.equal(logTexts(state, c.id).some(isBattle), false, 'третий игрок в тумане боя не видит');
+  console.log('✓ журнал: бой в тумане виден только участникам');
+}
+
+function checkLogPublic(): void {
+  const state = newGameN(3);
+  const a = currentPlayer(state)!;
+  const b = state.players.find((p) => p.id !== a.id)!;
+  const c = state.players.find((p) => p.id !== a.id && p.id !== b.id)!;
+  const bCap = capitalOf(state, b.id);
+  const staging = neighbors(state, bCap).find((t) => TERRAIN[t.terrain].passable)!;
+  staging.ownerId = a.id;
+  staging.terrain = 'plains';
+  staging.army = { heavy_cavalry: 200 };
+  staging.movesLeft = 2;
+  const res = applyAction(state, a.id, {
+    type: 'move',
+    from: { x: staging.x, y: staging.y },
+    to: { x: bCap.x, y: bCap.y },
+    count: 200,
+  });
+  assert.ok(res.ok);
+  assert.equal(b.alive, false);
+  assert.ok(logTexts(state, c.id).some((t) => t.includes('пала')), 'о падении державы знают все');
+
+  const open = newGame();
+  open.settings.fogOfWar = false;
+  const oa = currentPlayer(open)!;
+  const ob = open.players.find((p) => p.id !== oa.id)!;
+  oa.resources = { gold: 500, food: 500, iron: 500 };
+  applyAction(open, oa.id, { type: 'recruit', at: capitalOf(open, oa.id), count: 1, unit: 'light_infantry' });
+  assert.ok(logTexts(open, ob.id).some((t) => t.includes('нанимает')), 'без тумана журнал виден целиком');
+  console.log('✓ журнал: публичные записи и игра без тумана');
+}
+
+
+function checkNormalizeOldState(): void {
+  const state = newGame();
+  // Старое сохранение: нет полей, добавленных позже.
+  const raw = JSON.parse(JSON.stringify(state)) as GameState;
+  const settings = raw.settings as unknown as Record<string, unknown>;
+  for (const key of ['era', 'turnMinutes', 'randomEvents', 'diplomacy']) delete settings[key];
+  for (const key of ['turnDeadline', 'history', 'records', 'relations', 'proposals', 'rematchCode']) {
+    delete (raw as unknown as Record<string, unknown>)[key];
+  }
+  for (const player of raw.players) {
+    for (const key of ['stats', 'effects', 'recentEvents', 'eventCooldown', 'pendingEvent', 'ai']) {
+      delete (player as unknown as Record<string, unknown>)[key];
+    }
+  }
+  const loaded = normalizeState(raw);
+  assert.equal(loaded.settings.era, 'ancient');
+  assert.equal(loaded.settings.turnMinutes, 0);
+  assert.equal(loaded.settings.randomEvents, true);
+  assert.equal(loaded.settings.diplomacy, true);
+  const me = currentPlayer(loaded)!;
+  const cap = capitalOf(loaded, me.id);
+  me.resources = { gold: 200, food: 200, iron: 200 };
+  assert.ok(applyAction(loaded, me.id, { type: 'recruit', at: cap, count: 1, unit: 'light_infantry' }).ok, 'после загрузки партия играется');
+  assert.ok(applyAction(loaded, me.id, { type: 'endTurn' }).ok, 'ход завершается');
+  assert.equal(currentPlayer(loaded)!.id !== me.id, true);
+  console.log('✓ старое сохранение загружается и играется');
+}
+
+function checkTurnMinutesSanitize(): void {
+  const state = createGame('ROOM2', 'p1', 1);
+  addPlayer(state, 'p1', 'Хост');
+  assert.equal(state.settings.turnMinutes, 0, 'по умолчанию без лимита');
+  for (const bad of [1, 3, 30, 61, -5, Number.NaN, '5', 999999, null, {}]) {
+    applyLobbyAction(state, 'p1', { type: 'configure', settings: { turnMinutes: bad as number } });
+    assert.equal(state.settings.turnMinutes, 0, `значение ${String(bad)} не проходит`);
+  }
+  for (const ok of [2, 5, 60, 1440, 0]) {
+    assert.ok(applyLobbyAction(state, 'p1', { type: 'configure', settings: { turnMinutes: ok } }).ok);
+    assert.equal(state.settings.turnMinutes, ok);
+  }
+  applyLobbyAction(state, 'p1', { type: 'configure', settings: { randomEvents: false, diplomacy: false } });
+  assert.equal(state.settings.randomEvents, false);
+  assert.equal(state.settings.diplomacy, false);
+  applyLobbyAction(state, 'p1', { type: 'configure', settings: { randomEvents: 'yes' as unknown as boolean } });
+  assert.equal(state.settings.randomEvents, false, 'не-булево значение игнорируется');
+  console.log('✓ настройки: таймер хода, события и дипломатия проходят только допустимые значения');
+}
+
+function endTurns(state: GameState, n: number): void {
+  for (let i = 0; i < n && state.phase === 'playing'; i++) {
+    assert.ok(applyAction(state, currentPlayer(state)!.id, { type: 'endTurn' }).ok);
+  }
+}
+
+function checkHistoryRecorded(): void {
+  const state = newGame();
+  endTurns(state, 6);
+  assert.equal(state.round, 4, 'сыграно три полных раунда');
+  assert.equal(state.history.length, 3, 'по срезу на раунд');
+  assert.deepEqual(state.history.map((h) => h.round), [1, 2, 3]);
+  for (const point of state.history) {
+    for (const p of state.players) {
+      const row = point.players[p.id];
+      assert.ok(row, 'в срезе есть каждый игрок');
+      assert.ok(row.score > 0 && row.tiles > 0 && row.army > 0 && row.income > 0);
+    }
+  }
+  // Партия до конца по очкам: последний раунд не дублируется.
+  const short = newGame();
+  short.maxRounds = 2;
+  endTurns(short, 10);
+  assert.equal(short.phase, 'finished');
+  assert.deepEqual(short.history.map((h) => h.round), [1, 2]);
+  // Обрыв посреди раунда (падение державы) тоже попадает на график.
+  const cut = newGame();
+  const a = currentPlayer(cut)!;
+  const b = cut.players.find((p) => p.id !== a.id)!;
+  const bCap = capitalOf(cut, b.id);
+  const staging = neighbors(cut, bCap).find((t) => TERRAIN[t.terrain].passable)!;
+  staging.ownerId = a.id;
+  staging.terrain = 'plains';
+  staging.army = { heavy_cavalry: 200 };
+  staging.movesLeft = 2;
+  assert.ok(applyAction(cut, a.id, { type: 'move', from: staging, to: bCap, count: 200 }).ok);
+  assert.equal(cut.phase, 'finished');
+  assert.equal(cut.history.length, 1);
+  assert.equal(b.deadRound, 1, 'запомнили, на каком раунде пала держава');
+  console.log('✓ история по раундам записывается');
+}
+
+function checkHistoryMasked(): void {
+  const state = newGame();
+  endTurns(state, 4);
+  const mine = publicView(state, 'p1');
+  assert.equal(mine.history.length, 2);
+  for (const point of mine.history) {
+    assert.deepEqual(Object.keys(point.players), ['p1'], 'во время игры виден только свой ряд');
+  }
+  assert.deepEqual(mine.records, {}, 'рекорды скрыты');
+  const enemy = mine.players.find((p) => p.id === 'p2')!;
+  assert.deepEqual(enemy.stats, emptyStats(), 'чужие счётчики скрыты');
+  assert.equal(mine.players.find((p) => p.id === 'p1')!.stats.battlesWon, 0);
+  // После конца партии видно всё.
+  state.maxRounds = 2;
+  endTurns(state, 10);
+  assert.equal(state.phase, 'finished');
+  const done = publicView(state, 'p1');
+  for (const point of done.history) assert.equal(Object.keys(point.players).length, 2);
+  console.log('✓ история и рекорды скрыты до конца партии');
+}
+
+function checkBattleStats(): void {
+  const state = newGameN(3);
+  const a = currentPlayer(state)!;
+  const b = state.players.find((p) => p.id !== a.id)!;
+  const cap = capitalOf(state, a.id);
+  const target = neighbors(state, cap).find((t) => TERRAIN[t.terrain].passable)!;
+  target.ownerId = b.id;
+  target.terrain = 'plains';
+  target.army = { light_infantry: 1 };
+  cap.terrain = 'plains';
+  const before = armyCount(cap.army);
+  assert.ok(applyAction(state, a.id, { type: 'move', from: cap, to: target, count: before }).ok);
+  assert.equal(a.stats.battlesWon, 1);
+  assert.equal(b.stats.battlesLost, 1);
+  assert.ok(a.stats.unitsKilled >= 1 && b.stats.unitsLost >= 1);
+  assert.ok(a.stats.tilesCaptured >= 1, 'захват клетки посчитан');
+  assert.equal(state.records.firstBlood?.attackerId, a.id);
+  assert.ok((state.records.biggestBattle?.units ?? 0) >= before + 1);
+  a.resources = { gold: 500, food: 500, iron: 500 };
+  const hired = applyAction(state, a.id, { type: 'recruit', at: cap, count: 3, unit: 'light_infantry' });
+  assert.ok(hired.ok);
+  assert.equal(a.stats.unitsRecruited, 3);
+  console.log('✓ счётчики боёв, захватов и найма');
+}
+
+const ALWAYS_EVENTS = ['patron', 'pilgrims', 'holiday', 'scholar', 'smiths'];
+
+function bareEventContext(): EventContext {
+  return {
+    round: 5, tiles: 3, farms: 0, mines: 0, markets: 0, plains: 0, hills: 0, freeForests: 0, army: 0, gold: 0,
+    actionsLeft: 0, constructions: 0, longConstructions: 0, movingStacks: 0, hasCapital: false,
+    capitalHasArmy: false, capitalHasCommander: false, enemyNeighbors: 0, rivals: 0,
+  };
+}
+
+function checkEventConditions(): void {
+  const ctx = bareEventContext();
+  for (let i = 0; i < 400; i++) {
+    const def = pickEvent(ctx, { recent: new Set(), rank: 'mid', roll: i / 400 });
+    assert.ok(def && ALWAYS_EVENTS.includes(def.id), `без условий выпадают только безусловные события, а выпало ${def?.id}`);
+  }
+  // Условия открывают события.
+  const rich: EventContext = { ...ctx, farms: 1, plains: 5, hills: 1, mines: 1, hasCapital: true, gold: 100, tiles: 14, army: 12, rivals: 1, actionsLeft: 3 };
+  const seen = new Set<string>();
+  for (let i = 0; i < 2000; i++) {
+    const def = pickEvent(rich, { recent: new Set(), rank: 'mid', roll: i / 2000 });
+    if (def) seen.add(def.id);
+  }
+  for (const id of ['harvest', 'crop_failure', 'drought', 'gold_vein', 'mine_collapse', 'caravan', 'tax_revolt', 'camp_plague', 'mercenaries', 'court_intrigue', 'spy']) {
+    assert.ok(seen.has(id), `при выполненных условиях бывает ${id}`);
+  }
+  assert.ok(!seen.has('forest_fire') && !seen.has('flood') && !seen.has('defectors'), 'без леса, стройки и врага этих событий нет');
+  // Недавнее событие не повторяется.
+  const only = pickEvent(ctx, { recent: new Set(ALWAYS_EVENTS.slice(0, 4)), rank: 'mid', roll: 0.5 });
+  assert.equal(only?.id, 'smiths');
+  assert.equal(pickEvent(ctx, { recent: new Set(ALWAYS_EVENTS), rank: 'mid', roll: 0.5 }), null);
+  // Подтяжка: отстающему хорошие события чаще, лидеру плохие.
+  const share = (rank: 'leader' | 'lagging') => {
+    let good = 0;
+    for (let i = 0; i < 2000; i++) {
+      if (pickEvent(rich, { recent: new Set(), rank, roll: i / 2000 })?.tone === 'good') good += 1;
+    }
+    return good;
+  };
+  assert.ok(share('lagging') > share('leader'), 'отстающий получает больше хороших событий');
+  console.log('✓ события: условия, повторы и подтяжка отстающих');
+}
+
+function checkEventsOff(): void {
+  for (const seed of [1, 2, 3]) {
+    const state = newGameN(3, seed);
+    state.settings.randomEvents = false;
+    endTurns(state, 200);
+    assert.equal(state.phase, 'finished', 'партия доиграна');
+    for (const p of state.players) {
+      assert.equal(p.recentEvents.length, 0, 'события выключены — ни одного за 30 раундов');
+      assert.equal(p.effects.length, 0);
+      assert.ok(!p.event);
+    }
+  }
+  console.log('✓ события выключены — их нет');
+}
+
+function eventSummary(state: GameState): string {
+  return JSON.stringify(state.players.map((p) => [p.id, p.recentEvents, p.event?.detail, p.resources]));
+}
+
+function checkEventsDeterministic(): void {
+  const play = () => {
+    const s = newGameN(3, 777);
+    endTurns(s, 120);
+    return s;
+  };
+  const a = play();
+  const b = play();
+  assert.equal(eventSummary(a), eventSummary(b), 'один seed — те же события');
+  const total = a.players.reduce((n, p) => n + p.recentEvents.length, 0);
+  assert.ok(total > 0, 'за 40 раундов события случаются');
+  for (const p of a.players) {
+    const rounds = p.recentEvents.map((e) => e.round);
+    assert.ok(rounds.every((r) => r >= 3), 'не раньше 3-го раунда');
+  }
+  const other = newGameN(3, 4242);
+  endTurns(other, 120);
+  assert.notEqual(eventSummary(a), eventSummary(other), 'другой seed — другие события');
+  console.log('✓ события детерминированы по seed');
+}
+
+function checkEventsAllApply(): void {
+  for (const def of EVENT_DEFS) {
+    for (const choice of def.choice ? ([0, 1] as const) : ([1] as const)) {
+      const state = newGameN(3, 99);
+      state.round = 5;
+      const p = currentPlayer(state)!;
+      const cap = capitalOf(state, p.id);
+      p.resources = { gold: 300, food: 300, iron: 300 };
+      // Обстановка, при которой применяются все события.
+      const ring = neighbors(state, cap).filter((t) => TERRAIN[t.terrain].passable);
+      ring[0]!.terrain = 'forest';
+      ring[0]!.ownerId = p.id;
+      ring[1]!.ownerId = p.id;
+      ring[1]!.construction = { building: 'farm', turnsLeft: 3 };
+      ring[2]!.ownerId = p.id;
+      writeWings(ring[2]!, [{ army: { medium_infantry: 12 }, movesLeft: 1, shotsLeft: 1 }]);
+      const foe = state.players.find((x) => x.id !== p.id)!;
+      const foeTile = ring[3]!;
+      foeTile.ownerId = foe.id;
+      foeTile.army = { heavy_infantry: 4 };
+      startEvent(state, p, def);
+      if (def.choice) {
+        assert.ok(p.event?.pending, `${def.id}: ждёт выбора`);
+        assert.ok(applyAction(state, p.id, { type: 'eventChoice', choice }).ok, `${def.id}: выбор принят`);
+      }
+      assert.equal(p.event?.id, def.id);
+      assert.equal(p.event?.pending, false);
+      assert.ok(p.event!.detail.length > 0, `${def.id}: есть итог «${p.event?.detail}»`);
+    }
+  }
+  console.log('✓ все события применяются без ошибок');
+}
+
+function checkEventChoiceTimeout(): void {
+  const state = newGame();
+  const p = currentPlayer(state)!;
+  p.event = { id: 'caravan', round: 1, pending: true, detail: '' };
+  const gold = p.resources.gold;
+  const food = p.resources.food;
+  // Нет выбора — нельзя отвечать.
+  const other = state.players.find((x) => x.id !== p.id)!;
+  assert.equal(applyAction(state, other.id, { type: 'eventChoice', choice: 1 }).ok, false, 'не свой ход');
+  // Не хватает еды — вариант «обменять» отклоняется.
+  p.resources.food = 5;
+  assert.equal(applyAction(state, p.id, { type: 'eventChoice', choice: 1 }).ok, false);
+  assert.ok(p.event?.pending, 'после отказа выбор всё ещё ждёт');
+  p.resources.food = food;
+  // Не ответил до конца хода — «отказаться».
+  assert.ok(applyAction(state, p.id, { type: 'endTurn' }).ok);
+  assert.equal(p.event?.pending, false);
+  assert.equal(p.resources.gold, gold, 'при отказе ресурсы не меняются');
+  assert.equal(p.event?.detail, 'Вы отказались');
+  // Согласие даёт золото за еду.
+  const s2 = newGame();
+  const q = currentPlayer(s2)!;
+  q.event = { id: 'caravan', round: 1, pending: true, detail: '' };
+  const g2 = q.resources.gold;
+  const f2 = q.resources.food;
+  assert.ok(applyAction(s2, q.id, { type: 'eventChoice', choice: 1 }).ok);
+  assert.equal(q.resources.gold, g2 + 35);
+  assert.equal(q.resources.food, f2 - 20);
+  assert.equal(applyAction(s2, q.id, { type: 'eventChoice', choice: 1 }).ok, false, 'второй раз ответить нельзя');
+  assert.equal(q.stats.eventsGood, 1);
+  console.log('✓ выбор по событию: ответ, недостаток ресурсов, отказ по таймауту хода');
+}
+
+function checkEventLogPrivate(): void {
+  const state = newGameN(3);
+  const p = currentPlayer(state)!;
+  startEvent(state, p, EVENT_DEFS.find((d) => d.id === 'patron')!);
+  const patron = (id: string) => logTexts(state, id).some((t) => t.includes('Меценат'));
+  assert.ok(patron(p.id), 'игрок видит своё событие');
+  for (const o of state.players.filter((x) => x.id !== p.id)) assert.equal(patron(o.id), false, 'чужое событие в журнале скрыто');
+  const seenView = publicView(state, state.players.find((x) => x.id !== p.id)!.id);
+  assert.equal(seenView.players.find((x) => x.id === p.id)!.event, null, 'карточка чужого события скрыта');
+  // Лесной пожар видят свидетели.
+  const cap = capitalOf(state, p.id);
+  for (const t of state.tiles) if (t.ownerId === p.id && t.terrain === 'forest') t.terrain = 'plains';
+  const forest = neighbors(state, cap).find((t) => TERRAIN[t.terrain].passable)!;
+  forest.terrain = 'forest';
+  forest.ownerId = p.id;
+  forest.army = {};
+  const witness = state.players.find((x) => x.id !== p.id)!;
+  const wn = neighbors(state, forest).find((t) => t.ownerId !== p.id && TERRAIN[t.terrain].passable && t !== cap)
+    ?? neighbors(state, forest).find((t) => t !== cap && TERRAIN[t.terrain].passable)!;
+  wn.ownerId = witness.id;
+  wn.army = { light_infantry: 1 };
+  const bystander = state.players.find((x) => x.id !== p.id && x.id !== witness.id)!;
+  startEvent(state, p, EVENT_DEFS.find((d) => d.id === 'forest_fire')!);
+  assert.equal(forest.terrain, 'plains');
+  const fire = (id: string) => logTexts(state, id).some((t) => t.includes('Лесной пожар'));
+  assert.ok(fire(p.id));
+  assert.ok(fire(witness.id), 'свидетель видит пожар на карте');
+  assert.equal(fire(bystander.id), false, 'вне обзора пожар не виден');
+  console.log('✓ события: журнал и карточка только владельцу, пожар — свидетелям');
+}
+
+function checkEventEffects(): void {
+  const state = newGame();
+  const p = currentPlayer(state)!;
+  const base = computeIncome(state, p.id);
+  const baseAttack = attackMultiplier(p);
+  p.effects = [{ id: 'crop_failure', turnsLeft: 2, incomeMul: { food: 0.7 } }];
+  assert.ok(computeIncome(state, p.id).food < base.food, 'неурожай режет доход еды');
+  assert.equal(computeIncome(state, p.id).gold, base.gold);
+  p.effects = [{ id: 'morale', turnsLeft: 2, attackMul: 1.1 }];
+  assert.ok(Math.abs(attackMultiplier(p) - baseAttack * 1.1) < 1e-9);
+  p.effects = [{ id: 'scholar', turnsLeft: 10, researchDiscount: 0.5 }];
+  const full = techCost(0);
+  const half = techCostFor(p, 0);
+  assert.ok(half.gold < full.gold && half.gold >= Math.floor(full.gold / 2));
+  p.resources = { gold: 500, food: 500, iron: 500 };
+  assert.ok(applyAction(state, p.id, { type: 'research', tech: 'economy' }).ok);
+  assert.equal(p.effects.length, 0, 'скидка уходит после одной технологии');
+  // Эффекты тикают: каждый ход игрока — минус один.
+  p.effects = [{ id: 'crop_failure', turnsLeft: 2, incomeMul: { food: 0.7 } }];
+  endTurns(state, 2);
+  assert.equal(p.effects[0]?.turnsLeft, 1);
+  endTurns(state, 2);
+  assert.equal(p.effects.length, 0);
+  console.log('✓ эффекты событий: доход, атака, скидка на технологию, срок действия');
+}
+
+function treatyGame(n = 3): { state: GameState } {
+  return { state: newGameN(n, 31) };
+}
+
+function makeTreaty(state: GameState, from: string, to: string, kind: 'truce' | 'alliance', rounds = 3): void {
+  const prop = applyAction(state, from, { type: 'propose', to, kind, ...(kind === 'truce' ? { rounds } : {}) });
+  assert.ok(prop.ok, prop.ok ? '' : prop.error);
+  const acc = applyAction(state, to, { type: 'acceptProposal', id: `${from}>${to}` });
+  assert.ok(acc.ok, acc.ok ? '' : acc.error);
+}
+
+/** Соседняя с чужой столицей клетка: игрок `who` ставит туда стек, чтобы бить по столице. */
+function stageNextToCapital(state: GameState, who: string, victim: string): { staging: Tile; target: Tile } {
+  const target = capitalOf(state, victim);
+  const staging = neighbors(state, target).find((t) => TERRAIN[t.terrain].passable && t.ownerId !== who)!;
+  staging.ownerId = who;
+  staging.terrain = 'plains';
+  writeWings(staging, [{ army: { medium_infantry: 5 }, movesLeft: 2, shotsLeft: 1 }]);
+  return { staging, target };
+}
+
+function checkTruceBlocksAttack(): void {
+  const { state } = treatyGame(3);
+  const a = currentPlayer(state)!;
+  const b = state.players.find((p) => p.id !== a.id)!;
+  // Предложение можно сделать и принять не в свой ход.
+  const outOfTurn = applyAction(state, b.id, { type: 'propose', to: a.id, kind: 'truce', rounds: 5 });
+  assert.ok(outOfTurn.ok, 'договор предлагают не только в свой ход');
+  assert.equal(applyAction(state, b.id, { type: 'propose', to: a.id, kind: 'truce', rounds: 5 }).ok, false, 'дубль предложения');
+  assert.equal(applyAction(state, b.id, { type: 'acceptProposal', id: `${b.id}>${a.id}` }).ok, false, 'принимает адресат, а не автор');
+  assert.ok(applyAction(state, a.id, { type: 'acceptProposal', id: `${b.id}>${a.id}` }).ok);
+  assert.equal(relationOf(state, a.id, b.id)?.kind, 'truce');
+
+  const { staging, target } = stageNextToCapital(state, a.id, b.id);
+  const attack = applyAction(state, a.id, { type: 'move', from: staging, to: target, count: 5 });
+  assert.equal(attack.ok, false, 'перемирие запрещает вход на чужие земли');
+  const bTile = neighbors(state, target).find((t) => t.ownerId === b.id && t !== target)!;
+  bTile.army = { medium_infantry: 2 };
+  writeWings(staging, [{ army: { light_archer: 3 }, movesLeft: 1, shotsLeft: 1 }]);
+  const shot = applyAction(state, a.id, { type: 'shoot', from: staging, to: bTile });
+  assert.equal(shot.ok, false, 'и стрелять нельзя');
+  // Пути и подсветка тоже закрыты.
+  assert.equal(walkPath(state, staging, target, a.id, 1, true), null);
+  // Третья держава — не под защитой договора.
+  const c = state.players.find((p) => p.id !== a.id && p.id !== b.id)!;
+  const cCap = capitalOf(state, c.id);
+  const near = neighbors(state, cCap).find((t) => TERRAIN[t.terrain].passable && t.ownerId === c.id)!;
+  near.army = { medium_infantry: 1 };
+  const stage2 = neighbors(state, near).find((t) => TERRAIN[t.terrain].passable && t.ownerId !== c.id && t !== cCap)!;
+  stage2.ownerId = a.id;
+  writeWings(stage2, [{ army: { heavy_cavalry: 30 }, movesLeft: 2, shotsLeft: 1 }]);
+  assert.ok(applyAction(state, a.id, { type: 'move', from: stage2, to: near, count: 30 }).ok, 'третьего атаковать можно');
+  console.log('✓ перемирие блокирует атаку и залп');
+}
+
+function checkTruceExpires(): void {
+  const { state } = treatyGame(3);
+  makeTreaty(state, 'p1', 'p2', 'truce', 3);
+  assert.equal(relationOf(state, 'p1', 'p2')?.until, 4);
+  endTurns(state, 3 * 3 - 1);
+  assert.equal(state.round, 3);
+  assert.ok(relationOf(state, 'p1', 'p2'), 'на третьем раунде перемирие ещё действует');
+  endTurns(state, 1);
+  assert.equal(state.round, 4);
+  assert.equal(relationOf(state, 'p1', 'p2'), undefined, 'срок вышел — снова война');
+  assert.ok(logTexts(state, 'p3').some((t) => t.includes('Перемирие') && t.includes('истекло')), 'об окончании перемирия знают все');
+  // Неверный срок не принимается.
+  assert.equal(applyAction(state, 'p1', { type: 'propose', to: 'p2', kind: 'truce', rounds: 4 }).ok, false);
+  assert.equal(applyAction(state, 'p1', { type: 'propose', to: 'p2', kind: 'truce' }).ok, false);
+  // Предложение сгорает вместе с ходом адресата.
+  assert.ok(applyAction(state, 'p1', { type: 'propose', to: 'p2', kind: 'truce', rounds: 3 }).ok);
+  endTurns(state, 3);
+  assert.equal(state.proposals.length, 0, 'предложение не пережило ход адресата');
+  console.log('✓ перемирие истекает, предложения сгорают');
+}
+
+function checkAllianceSharedVision(): void {
+  const { state } = treatyGame(3);
+  const a = state.players[0]!;
+  const b = state.players[1]!;
+  const bCap = capitalOf(state, b.id);
+  const far = state.tiles.find((t) => hexDistance(t, bCap) === 2 && TERRAIN[t.terrain].passable)!;
+  // Клетка рядом с B, далеко от A.
+  far.terrain = 'plains';
+  assert.equal(canWatchTile(state, a.id, far), false, 'без союза A не видит клетку у столицы B');
+  assert.equal(maskStateFor(state, a.id).tiles.find((t) => t.x === bCap.x && t.y === bCap.y)!.ownerId, null);
+  makeTreaty(state, a.id, b.id, 'alliance');
+  assert.equal(relationOf(state, a.id, b.id)?.kind, 'alliance');
+  assert.equal(canWatchTile(state, a.id, far), true, 'союзник видит то, что видит B');
+  const seen = maskStateFor(state, a.id).tiles.find((t) => t.x === bCap.x && t.y === bCap.y)!;
+  assert.equal(seen.ownerId, b.id, 'столица союзника видна');
+  assert.equal(armyCount(seen.army), armyCount(bCap.army), 'и его войска тоже');
+  // Чужой (третий) по-прежнему не видит.
+  const c = state.players[2]!;
+  assert.equal(canWatchTile(state, c.id, bCap), false);
+  // Союзная война не идёт: A не может атаковать B.
+  const { staging, target } = stageNextToCapital(state, a.id, b.id);
+  state.turnIndex = state.order.indexOf(a.id);
+  assert.equal(applyAction(state, a.id, { type: 'move', from: staging, to: target, count: 5 }).ok, false);
+  console.log('✓ союз: общий обзор');
+}
+
+function checkBreakTreatyDelay(): void {
+  const { state } = treatyGame(3);
+  makeTreaty(state, 'p1', 'p2', 'alliance');
+  const breaker = 'p1';
+  // Ходим до хода разрывающего.
+  while (currentPlayer(state)!.id !== breaker) endTurns(state, 1);
+  const round = state.round;
+  const other = applyAction(state, 'p2', { type: 'breakTreaty', with: 'p3' });
+  assert.equal(other.ok, false, 'нельзя разорвать несуществующий договор');
+  assert.ok(applyAction(state, breaker, { type: 'breakTreaty', with: 'p2' }).ok);
+  const rel = relationOf(state, 'p1', 'p2')!;
+  assert.equal(rel.breakAt, round + 1);
+  assert.equal(applyAction(state, breaker, { type: 'breakTreaty', with: 'p2' }).ok, false, 'дважды не разрывают');
+  assert.ok(logTexts(state, 'p3').some((t) => t.includes('разрывает')), 'разрыв объявлен публично');
+  const { staging, target } = stageNextToCapital(state, breaker, 'p2');
+  assert.equal(applyAction(state, breaker, { type: 'move', from: staging, to: target, count: 5 }).ok, false, 'в свой же ход воевать ещё нельзя');
+  // До следующего хода разорвавшего договор действует.
+  endTurns(state, 1);
+  while (currentPlayer(state)!.id !== breaker) {
+    assert.ok(relationOf(state, 'p1', 'p2'), 'до хода разорвавшего договор ещё действует');
+    endTurns(state, 1);
+  }
+  assert.equal(state.round, round + 1);
+  assert.equal(relationOf(state, 'p1', 'p2'), undefined, 'с его хода — война');
+  assert.ok(logTexts(state, 'p3').some((t) => t.startsWith('Война:')));
+  console.log('✓ разрыв договора вступает в силу с хода разорвавшего');
+}
+
+function checkAlliedVictory(): void {
+  const { state } = treatyGame(2);
+  state.tiles.find((t) => t.ownerId === 'p1' && !t.capitalOf)!.army = { medium_infantry: 20 };
+  makeTreaty(state, 'p1', 'p2', 'alliance');
+  assert.equal(state.phase, 'finished', 'все живые в союзе — общая победа');
+  const winner = state.players.find((p) => p.id === state.winnerId)!;
+  const partner = state.players.find((p) => p.id !== winner.id)!;
+  assert.equal(partner.alliedWinner, true, 'партнёр помечен союзником-победителем');
+  assert.ok(!winner.alliedWinner);
+  // Пока есть чужой — не победа.
+  const three = treatyGame(3).state;
+  makeTreaty(three, 'p1', 'p2', 'alliance');
+  assert.equal(three.phase, 'playing');
+  makeTreaty(three, 'p2', 'p3', 'alliance');
+  assert.equal(three.phase, 'playing');
+  makeTreaty(three, 'p1', 'p3', 'alliance');
+  assert.equal(three.phase, 'finished');
+  console.log('✓ союзная победа, когда все живые попарно в союзе');
+}
+
+function checkDiplomacyOff(): void {
+  const state = newGameN(3);
+  state.settings.diplomacy = false;
+  for (const action of [
+    { type: 'propose', to: 'p2', kind: 'truce', rounds: 3 },
+    { type: 'acceptProposal', id: 'p1>p2' },
+    { type: 'declineProposal', id: 'p1>p2' },
+    { type: 'breakTreaty', with: 'p2' },
+  ] as const) {
+    assert.equal(applyAction(state, 'p1', action).ok, false, `${action.type} отклоняется при выключенной дипломатии`);
+  }
+  const solo = createGame('SOLO1', 'h1', 5);
+  setupHotseat(solo, 'h1', 'Хост');
+  assert.equal(solo.settings.diplomacy, false, 'в соло дипломатии нет');
+  const bad = newGameN(3);
+  assert.equal(applyAction(bad, 'p1', { type: 'propose', to: 'p1', kind: 'truce', rounds: 3 }).ok, false, 'с самим собой нельзя');
+  assert.equal(applyAction(bad, 'p1', { type: 'propose', to: 'ghost', kind: 'truce', rounds: 3 }).ok, false, 'с неизвестной державой нельзя');
+  assert.equal(applyAction(bad, 'p1', { type: 'propose', to: 'p2', kind: 'peace' as 'truce', rounds: 3 }).ok, false);
+  console.log('✓ дипломатия выключена — действия отклоняются');
+}
+
+/** Партия только из ИИ: хост — служебный id, не игрок. */
+function aiGame(levels: AiLevel[], seed: number, opts: { mapSize?: number; rounds?: number; era?: 'ancient' | 'medieval' | 'napoleonic'; fog?: boolean } = {}): GameState {
+  const state = createGame('AITST', 'host', seed);
+  for (const level of levels) assert.ok(addAiPlayer(state, level).ok);
+  if (opts.mapSize) {
+    state.settings.mapSize = opts.mapSize;
+    state.width = opts.mapSize;
+    state.height = opts.mapSize;
+  }
+  if (opts.rounds) state.settings.maxRounds = opts.rounds;
+  if (opts.era) state.settings.era = opts.era;
+  if (opts.fog === false) state.settings.fogOfWar = false;
+  assert.ok(startGame(state, 'host').ok);
+  return state;
+}
+
+/** Играет партию до конца через stepAi; возвращает долю отклонённых действий. */
+function playOut(state: GameState, maxSteps = 20000): { rejected: number; attempts: number } {
+  let rejected = 0;
+  let attempts = 0;
+  let steps = 0;
+  let perTurn = 0;
+  let lastTurn = '';
+  while (state.phase === 'playing') {
+    assert.ok(steps++ < maxSteps, 'ИИ не довёл партию до конца');
+    const actor = state.pendingSquare ? state.pendingSquare.defenderId : currentPlayer(state)!.id;
+    const turn = `${state.round}:${state.turnIndex}`;
+    if (turn !== lastTurn) {
+      lastTurn = turn;
+      perTurn = 0;
+    }
+    assert.ok(++perTurn < 120, 'ИИ не заканчивает ход');
+    const step = stepAi(state, actor);
+    attempts += step.attempts;
+    rejected += step.rejected;
+    assert.ok(step.result, 'у ИИ всегда есть что сделать');
+  }
+  return { rejected, attempts };
+}
+
+function checkAiFullGame(): void {
+  for (const [era, size] of [['ancient', 10], ['medieval', 8], ['napoleonic', 12]] as const) {
+    const state = aiGame(['easy', 'normal', 'hard'], 7, { mapSize: size, rounds: 30, era });
+    const { rejected, attempts } = playOut(state);
+    assert.equal(state.phase, 'finished', `${era}: партия дошла до конца`);
+    assert.ok(attempts > 100, 'ИИ реально играл');
+    assert.ok(rejected / attempts < 0.1, `${era}: отклонённых действий ${rejected}/${attempts} — меньше 10%`);
+    assert.ok(state.history.length >= 1 && state.players.some((p) => p.stats.tilesCaptured > 0), 'ИИ расширялся');
+  }
+  // Против человека: ИИ ходит только за себя, а люди остаются нетронутыми.
+  const mixed = createGame('MIX01', 'p1', 3);
+  addPlayer(mixed, 'p1', 'Человек');
+  assert.ok(addAiPlayer(mixed, 'normal').ok);
+  assert.ok(startGame(mixed, 'p1').ok, 'человек и ИИ — партия стартует');
+  assert.equal(mixed.players[1]!.ai, 'normal');
+  assert.equal(mixed.players[1]!.connected, true, 'ИИ всегда на связи');
+  console.log('✓ ИИ доигрывает партии трёх эпох без ошибок');
+}
+
+function checkAiNoFogCheat(): void {
+  const state = aiGame(['normal', 'hard'], 21, { mapSize: 10, rounds: 30 });
+  // Разгоняем партию, чтобы у сторон были стеки.
+  let guard = 0;
+  while (state.phase === 'playing' && state.round < 7 && guard++ < 5000) stepAi(state, currentPlayer(state)!.id);
+  assert.equal(state.phase, 'playing');
+  for (const ai of state.players) {
+    const before = state.players.map((p) => `${p.id}:${p.resources.gold}`).join();
+    const plan1 = planAiTurn(publicView(state, ai.id), ai.id);
+    assert.ok(plan1.length >= 1 && plan1[plan1.length - 1]!.type === 'endTurn');
+    // Подменяем всё, что ИИ не видит: чужие войска, казну, технологии, seed.
+    const twin = JSON.parse(JSON.stringify(state)) as GameState;
+    let changed = 0;
+    for (const tile of twin.tiles) {
+      if (tile.ownerId === ai.id || canWatchTile(state, ai.id, tile)) continue;
+      if (canDetectArmyOn(state, ai.id, tile) && armyCount(tile.army) === 0) continue;
+      tile.army = { heavy_cavalry: 40 };
+      tile.wings = [];
+      changed += 1;
+    }
+    for (const p of twin.players) {
+      if (p.id === ai.id) continue;
+      p.resources = { gold: 999, food: 999, iron: 999 };
+      p.tech = { attack: 5, defense: 5, economy: 5, logistics: 3 };
+    }
+    twin.seed = 987654;
+    assert.ok(changed > 0, 'в тумане есть что подменить');
+    const plan2 = planAiTurn(publicView(twin, ai.id), ai.id);
+    assert.deepEqual(plan2, plan1, `${ai.id}: план не зависит от скрытого туманом`);
+    assert.equal(state.players.map((p) => `${p.id}:${p.resources.gold}`).join(), before, 'планирование ничего не меняет');
+  }
+  console.log('✓ ИИ не подглядывает сквозь туман');
+}
+
+function checkAiHardBeatsEasy(): void {
+  let hardWins = 0;
+  for (let i = 1; i <= 10; i++) {
+    const hardFirst = i % 2 === 1;
+    const state = aiGame(hardFirst ? ['hard', 'easy'] : ['easy', 'hard'], i * 101, { mapSize: 10, rounds: 30 });
+    playOut(state);
+    if (state.players.find((p) => p.id === state.winnerId)?.ai === 'hard') hardWins += 1;
+  }
+  assert.ok(hardWins >= 7, `сложный ИИ побеждает лёгкого в ${hardWins} из 10 партий — не меньше 7`);
+  console.log(`✓ сложный ИИ обыгрывает лёгкого: ${hardWins} из 10`);
+}
+
+function checkAiDiplomacyAndEvents(): void {
+  // Предложение ИИ: слабый принимает перемирие, лёгкий может отклонить, союз втроём — только сложный.
+  const state = aiGame(['hard', 'normal', 'easy'], 5, { mapSize: 10, rounds: 30 });
+  const hard = state.players[0]!;
+  const human = 'p-human';
+  state.proposals.push({ id: `${human}>${hard.id}`, from: human, to: hard.id, kind: 'alliance', round: 1 });
+  const answers = planAiDiplomacy(publicView(state, hard.id), hard.id, { respondOnly: true });
+  assert.deepEqual(answers, [], 'от неизвестной державы ответа нет');
+  state.proposals = [];
+  const normal = state.players[1]!;
+  state.proposals.push({ id: `${normal.id}>${hard.id}`, from: normal.id, to: hard.id, kind: 'truce', rounds: 3, round: 1 });
+  const reply = planAiDiplomacy(publicView(state, hard.id), hard.id, { respondOnly: true });
+  assert.equal(reply.length, 1);
+  assert.ok(['acceptProposal', 'declineProposal'].includes(reply[0]!.type));
+  // Выбор по событию ИИ делает сам.
+  const ai = currentPlayer(state)!;
+  ai.event = { id: 'caravan', round: 1, pending: true, detail: '' };
+  ai.resources = { gold: 100, food: 100, iron: 50 };
+  const plan = planAiTurn(publicView(state, ai.id), ai.id);
+  assert.equal(plan[0]!.type, 'eventChoice', 'ответ на событие — первым');
+  const step = stepAi(state, ai.id);
+  assert.ok(step.result?.ok);
+  assert.equal(ai.event?.pending, false);
+  console.log('✓ ИИ отвечает на договоры и события');
+}
+
+function checkLobbyAi(): void {
+  const state = createGame('AILB1', 'p1', 9);
+  addPlayer(state, 'p1', 'Хост');
+  addPlayer(state, 'p2', 'Гость');
+  assert.equal(applyLobbyAction(state, 'p2', { type: 'addAi', difficulty: 'easy' }).ok, false, 'ИИ добавляет только хост или админ');
+  assert.ok(applyLobbyAction(state, 'p1', { type: 'addAi', difficulty: 'easy' }).ok);
+  assert.ok(applyLobbyAction(state, 'p1', { type: 'addAi', difficulty: 'hard' }).ok);
+  assert.equal(state.players.length, 4);
+  assert.equal(applyLobbyAction(state, 'p1', { type: 'addAi', difficulty: 'normal' }).ok, false, 'мест нет');
+  const ai = state.players.filter((p) => p.ai);
+  assert.deepEqual(ai.map((p) => p.id), ['ai:1', 'ai:2']);
+  assert.deepEqual(ai.map((p) => p.ai), ['easy', 'hard']);
+  assert.equal(applyLobbyAction(state, 'p1', { type: 'removeAi', playerId: 'p2' }).ok, false, 'человека так не убрать');
+  assert.equal(applyLobbyAction(state, 'p1', { type: 'removeAi', playerId: 'ghost' }).ok, false);
+  assert.ok(applyLobbyAction(state, 'p1', { type: 'removeAi', playerId: 'ai:1' }).ok);
+  assert.equal(state.players.length, 3);
+  assert.ok(applyLobbyAction(state, 'p1', { type: 'addAi', difficulty: 'normal' }).ok);
+  assert.ok(state.players.some((p) => p.id === 'ai:1' && p.ai === 'normal'), 'освободившийся номер переиспользуется');
+  // Человек уходит — хостом становится следующий человек, а не ИИ.
+  markDisconnected(state, 'ai:2');
+  assert.equal(state.players.find((p) => p.id === 'ai:2')!.connected, true, 'ИИ не бывает офлайн');
+  removePlayer(state, 'p1');
+  assert.equal(state.hostId, 'p2');
+  removePlayer(state, 'p2');
+  assert.equal(state.hostId, '', 'в лобби остались одни ИИ — хоста нет, ИИ хостом не становится');
+  assert.equal(humanPlayers(state).length, 0);
+  // Человек + один ИИ — партия стартует; соло с ИИ и hotseat несовместимы.
+  const duel = createGame('AILB2', 'h', 1);
+  addPlayer(duel, 'h', 'Один');
+  assert.equal(startGame(duel, 'h').ok, false, 'одному нельзя');
+  assert.ok(addAiPlayer(duel, 'easy').ok);
+  assert.ok(startGame(duel, 'h').ok, 'человек и ИИ');
+  const solo = createGame('SOLO2', 'h', 1);
+  setupHotseat(solo, 'h', 'Хост');
+  assert.equal(addAiPlayer(solo, 'easy').ok, false);
+  // Валидация payload'ов.
+  assert.deepEqual(parseLobbyAction({ type: 'addAi', difficulty: 'hard' }), { type: 'addAi', difficulty: 'hard' });
+  assert.equal(parseLobbyAction({ type: 'addAi', difficulty: 'godlike' }), null);
+  assert.equal(parseLobbyAction({ type: 'addAi' }), null);
+  assert.deepEqual(parseLobbyAction({ type: 'removeAi', playerId: 'ai:1' }), { type: 'removeAi', playerId: 'ai:1' });
+  assert.equal(parseLobbyAction({ type: 'removeAi', playerId: 42 }), null);
+  console.log('✓ лобби: добавить и убрать ИИ, хост остаётся человеком');
+}
+
+function checkValidateNewActions(): void {
+  assert.deepEqual(parseGameAction({ type: 'eventChoice', choice: 1 }), { type: 'eventChoice', choice: 1 });
+  assert.equal(parseGameAction({ type: 'eventChoice', choice: 2 }), null);
+  assert.equal(parseGameAction({ type: 'eventChoice', choice: '1' }), null);
+  assert.deepEqual(parseGameAction({ type: 'propose', to: 'p2', kind: 'truce', rounds: 5 }), { type: 'propose', to: 'p2', kind: 'truce', rounds: 5 });
+  assert.deepEqual(parseGameAction({ type: 'propose', to: 'p2', kind: 'alliance' }), { type: 'propose', to: 'p2', kind: 'alliance' });
+  assert.equal(parseGameAction({ type: 'propose', to: 'p2', kind: 'war' }), null);
+  assert.equal(parseGameAction({ type: 'propose', to: '', kind: 'truce' }), null);
+  assert.equal(parseGameAction({ type: 'propose', to: 'p2', kind: 'truce', rounds: 1.5 }), null);
+  assert.equal(parseGameAction({ type: 'propose', to: 'p2', kind: 'truce', rounds: 1e9 }), null);
+  assert.equal(parseGameAction({ type: 'propose', to: 'x'.repeat(400), kind: 'truce' }), null);
+  assert.deepEqual(parseGameAction({ type: 'acceptProposal', id: 'a>b' }), { type: 'acceptProposal', id: 'a>b' });
+  assert.deepEqual(parseGameAction({ type: 'declineProposal', id: 'a>b' }), { type: 'declineProposal', id: 'a>b' });
+  assert.equal(parseGameAction({ type: 'acceptProposal' }), null);
+  assert.equal(parseGameAction({ type: 'acceptProposal', id: 5 }), null);
+  assert.deepEqual(parseGameAction({ type: 'breakTreaty', with: 'p2' }), { type: 'breakTreaty', with: 'p2' });
+  assert.equal(parseGameAction({ type: 'breakTreaty', with: null }), null);
+  console.log('✓ валидация: события, договоры и ИИ');
+}
+
 checkStart();
 checkValidateActions();
 checkLobbySettings();
@@ -2091,4 +2927,32 @@ checkEliminateClearsSquare();
 checkLobbyHostReassign();
 checkForecastCommander();
 checkShootNeedsVision();
+checkLogFogRecruit();
+checkLogFogResearch();
+checkLogFogBattle();
+checkLogPublic();
+checkNormalizeOldState();
+checkTurnMinutesSanitize();
+checkHistoryRecorded();
+checkHistoryMasked();
+checkBattleStats();
+checkEventConditions();
+checkEventsOff();
+checkEventsDeterministic();
+checkEventsAllApply();
+checkEventChoiceTimeout();
+checkEventLogPrivate();
+checkEventEffects();
+checkTruceBlocksAttack();
+checkTruceExpires();
+checkAllianceSharedVision();
+checkBreakTreatyDelay();
+checkAlliedVictory();
+checkDiplomacyOff();
+checkValidateNewActions();
+checkLobbyAi();
+checkAiFullGame();
+checkAiNoFogCheat();
+checkAiHardBeatsEasy();
+checkAiDiplomacyAndEvents();
 console.log('\nВсе проверки правил пройдены.');

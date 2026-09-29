@@ -1,4 +1,4 @@
-import type { BuildingType, GameSettings, Resources, TechType, TerrainType } from './types.js';
+import type { BuildingType, GameSettings, PlayerStats, Resources, TechType, TerrainType } from './types.js';
 
 export const MAX_PLAYERS = 4;
 export const MIN_PLAYERS = 2;
@@ -8,6 +8,8 @@ export const MAP_SIZE = 10;
 export const MAP_SIZES = [8, 10, 12, 14] as const;
 export const ROUND_OPTIONS = [20, 30, 40, 50] as const;
 export const ACTION_OPTIONS = [3, 4, 5, 6] as const;
+/** Время на ход, мин: 0 — без лимита. */
+export const TURN_MINUTES_OPTIONS = [0, 2, 5, 60, 1440] as const;
 /** Ширина bounding-box pointy-top гекса, px. Высота = round(width * 2 / √3). */
 export const HEX_WIDTH = 52;
 export const HEX_HEIGHT = Math.round((HEX_WIDTH * 2) / Math.sqrt(3));
@@ -154,7 +156,25 @@ export function defaultGameSettings(): GameSettings {
     actionsPerTurn: BASE_ACTIONS,
     hotseat: false,
     era: 'ancient',
+    turnMinutes: 0,
+    randomEvents: true,
+    diplomacy: true,
   };
 }
 
 export const PLAYER_COLORS = ['#e05263', '#3f8efc', '#f2b705', '#57cc99'];
+
+export function emptyStats(): PlayerStats {
+  return {
+    battlesWon: 0,
+    battlesLost: 0,
+    unitsKilled: 0,
+    unitsLost: 0,
+    tilesCaptured: 0,
+    buildingsBuilt: 0,
+    unitsRecruited: 0,
+    eventsGood: 0,
+    eventsBad: 0,
+    biggestBattle: 0,
+  };
+}
