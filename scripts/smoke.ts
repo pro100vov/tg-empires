@@ -72,6 +72,7 @@ import {
   humanPlayers,
   planAiDiplomacy,
   planAiTurn,
+  aiStrategyOf,
   stepAi,
   attackMultiplier,
   emptyStats,
@@ -2804,6 +2805,34 @@ function checkAiHardBeatsEasy(): void {
   console.log(`✓ сложный ИИ обыгрывает лёгкого: ${hardWins} из 10`);
 }
 
+function checkAiRiderRush(): void {
+  // Первый ход: ИИ нанимает лёгкую конницу, выводит табун на шаг и рассыпает всадников по ничьей земле.
+  const state = aiGame(['hard', 'hard'], 7, { mapSize: 12, rounds: 30 });
+  const ai = currentPlayer(state)!;
+  assert.equal(aiStrategyOf(publicView(state, ai.id), ai.id), 'expand', 'в начале — экспансия');
+  const before = state.tiles.filter((t) => t.ownerId === ai.id).length;
+  const recruits: string[] = [];
+  let guard = 0;
+  while (currentPlayer(state)?.id === ai.id && guard++ < 200) {
+    const step = stepAi(state, ai.id);
+    if (step.action?.type === 'recruit') recruits.push(step.action.unit ?? '');
+  }
+  const after = state.tiles.filter((t) => t.ownerId === ai.id).length;
+  assert.ok(recruits.includes('light_cavalry'), `нанята лёгкая конница: ${recruits.join(',')}`);
+  assert.ok(after - before >= 8, `за первый ход занято ${after - before} клеток — не меньше 8`);
+  // Партия доходит до контакта — стратегия меняется на фронт/наступление.
+  const seen = new Set<string>();
+  guard = 0;
+  while (state.phase === 'playing' && state.round < 16 && guard++ < 20000) {
+    const id = currentPlayer(state)!.id;
+    const s = aiStrategyOf(publicView(state, id), id);
+    if (s) seen.add(s);
+    stepAi(state, id);
+  }
+  assert.ok(seen.has('front') || seen.has('offensive'), `после встречи с врагом — фронт или наступление: ${[...seen].join(',')}`);
+  console.log(`✓ ИИ: табун лёгкой конницы (+${after - before} клеток за 1-й ход), затем стратегии ${[...seen].join('/')}`);
+}
+
 function checkAiDiplomacyAndEvents(): void {
   // Предложение ИИ: слабый принимает перемирие, лёгкий может отклонить, союз втроём — только сложный.
   const state = aiGame(['hard', 'normal', 'easy'], 5, { mapSize: 10, rounds: 30 });
@@ -2954,5 +2983,6 @@ checkLobbyAi();
 checkAiFullGame();
 checkAiNoFogCheat();
 checkAiHardBeatsEasy();
+checkAiRiderRush();
 checkAiDiplomacyAndEvents();
 console.log('\nВсе проверки правил пройдены.');

@@ -12,6 +12,8 @@ import { getRoom } from './rooms.js';
 const running = new Set<string>();
 const MIN_PAUSE_MS = 500;
 const JITTER_MS = 200;
+/** После мирного шага (всадники расходятся по ничьим клеткам) — пауза короче, чтобы ход ИИ не тянулся. */
+const QUICK_PAUSE_MS = 220;
 /** Страховка: больше действий за один запуск ИИ не делает. */
 const MAX_STEPS = 400;
 
@@ -47,6 +49,7 @@ function answerProposals(state: GameState): boolean {
 async function runLoop(code: string): Promise<boolean> {
   let steps = 0;
   let failures = 0;
+  let quick = false;
   while (steps < MAX_STEPS) {
     const state = getRoom(code);
     if (!state || !hasAiWork(state)) return true;
@@ -62,13 +65,14 @@ async function runLoop(code: string): Promise<boolean> {
       continue;
     }
 
-    await sleep(MIN_PAUSE_MS + Math.random() * JITTER_MS);
+    await sleep(quick ? QUICK_PAUSE_MS : MIN_PAUSE_MS + Math.random() * JITTER_MS);
     const fresh = getRoom(code);
     if (!fresh || fresh.phase !== 'playing') return true;
 
     const step = stepAi(fresh, actor);
     steps += 1;
     if (!step.result) return true;
+    quick = step.action?.type === 'move' && step.result.ok && (step.result.fx?.battle ?? 'none') === 'none';
     if (step.result.ok) {
       failures = 0;
       pushStateSafe(fresh, { fx: step.result.fx });
