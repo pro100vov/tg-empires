@@ -54,6 +54,7 @@ import {
   wingsAlreadyMarching,
   wingsToArmy,
   tileHasMarched,
+  tileShotIsFree,
   armyHasHeavyArtillery,
   MOVED_VOLLEY,
 } from './units.js';
@@ -971,7 +972,10 @@ function volleyCands(ctx: Ctx): Cand[] {
   const { me, view, t } = ctx;
   for (const from of ctx.stacks) {
     if (from.routedTurns > 0 || from.shotsLeft < 1) continue;
-    const marched = tileHasMarched(from, ctx.era, 0);
+    const bonus = from.commander ? COMMANDERS[from.commander].speedBonus : 0;
+    const marched = tileHasMarched(from, ctx.era, bonus);
+    // Залп после хода идёт в счёт того же приказа — без ⚡.
+    if (me.actionsLeft < 1 && !tileShotIsFree(from, ctx.era, bonus)) continue;
     if (marched && armyHasHeavyArtillery(from.army, ctx.era)) continue;
     const range = armyRange(from.army, ctx.era, from.terrain);
     if (range < 1) continue;
@@ -1305,11 +1309,11 @@ export function planAiTurn(view: GameState, aiId: string): GameAction[] {
       ...buildCands(ctx),
       ...researchCands(ctx),
       ...attackCands(ctx),
-      ...volleyCands(ctx),
       ...squareCands(ctx),
       ...riderRelocateCands(ctx),
     );
   }
+  cands.push(...volleyCands(ctx));
   // Бесплатные продолжения похода движок не берёт за действие — их ищем и без запаса ⚡.
   cands.push(...expandCands(ctx), ...reinforceCands(ctx), ...advanceCands(ctx));
 
@@ -1332,8 +1336,9 @@ function planWargameTurn(view: GameState, me: Player): GameAction[] {
   const ctx = buildCtx(view, me);
   const cands: Cand[] = [];
   if (me.actionsLeft > 0) {
-    cands.push(...attackCands(ctx), ...volleyCands(ctx), ...squareCands(ctx), ...warFortCands(ctx));
+    cands.push(...attackCands(ctx), ...squareCands(ctx), ...warFortCands(ctx));
   }
+  cands.push(...volleyCands(ctx));
   cands.push(...warAdvanceCands(ctx));
   cands.sort((a, b) => b.score - a.score);
   if (ctx.t.skip > 0 && cands.length > 1 && ctx.rand() < ctx.t.skip) cands.splice(0, 1);

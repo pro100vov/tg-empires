@@ -51,6 +51,7 @@ import {
   canAnswerSquare,
   armyHasHeavyArtillery,
   tileHasMarched,
+  tileShotIsFree,
   MOVED_VOLLEY,
   canFormSquare,
   shouldOfferSquare,
@@ -1234,10 +1235,11 @@ function TileDetails({
   const pinned = squarePinned(state, tile);
   const marched = tileHasMarched(tile, era, tile.commander ? COMMANDERS[tile.commander].speedBonus : 0);
   const heavyGunMoved = marched && armyHasHeavyArtillery(tile.army, era);
-  const canShoot = tile.routedTurns < 1 && tile.shotsLeft > 0 && !heavyGunMoved;
-  const canMarch = tile.routedTurns < 1 && mobileCount(ensureWings(tile)) > 0 && !pinned;
   const { min: minMp, max: maxMp } = wingMoveRange(tile);
   const actionsLeft = state.players.find((p) => p.id === meId)?.actionsLeft ?? 0;
+  const freeShot = tileShotIsFree(tile, era, tile.commander ? COMMANDERS[tile.commander].speedBonus : 0);
+  const canShoot = tile.routedTurns < 1 && tile.shotsLeft > 0 && !heavyGunMoved && (freeShot || actionsLeft > 0);
+  const canMarch = tile.routedTurns < 1 && mobileCount(ensureWings(tile)) > 0 && !pinned;
   const canSquare =
     era === 'napoleonic' && isMine && isMyTurn && actionsLeft > 0 && canFormSquare(tile) && !tile.square;
 
@@ -1368,7 +1370,11 @@ function TileDetails({
                     ? 'после хода нельзя'
                     : tile.shotsLeft < 1
                       ? 'уже стреляли'
-                      : marched
+                      : freeShot
+                        ? `${archers} · после хода · 0⚡`
+                        : actionsLeft < 1
+                          ? 'нет ⚡'
+                        : marched
                         ? `${archers} · слабее после хода`
                         : armyCanKite(tile.army)
                           ? `${archers} · ${eraInfo.kiteLabel.toLowerCase()}`

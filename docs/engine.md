@@ -65,7 +65,7 @@
 | `recruit` | 1042 | 1⚡, только в столице или казармах; `Object.hasOwn(units, action.unit)`; новое «крыло» с полным ходом |
 | `appoint` | 1067 | 1⚡, `Object.hasOwn(commanders, action.commander)`; командир на стек в столице/казармах; +ход неходившим крыльям |
 | `move` | 1109 | проверки → набег (dist=2, не в лес, путь открыт, все умеют charge) → проверка 1⚡ (если стек ещё не маршировал) → предложение каре → списание 1⚡ → мирный ход / бой (`resolveBattle`) / захват пустой клетки; взятие столицы → `eliminate` |
-| `shoot` | 1362 | 1⚡, стрелки в дальности (`volleyArmy`), цель должна быть видна (`canWatchTile` + `canSeeArmyOn`, при тумане), укрытие цели, штраф после марша, тяжёлая артиллерия после хода не стреляет; конные лучники сохраняют ход (kite); полное уничтожение гарнизона идёт через `clearMarch(to)` (не оставляет ложный `square`); возможна паника гарнизона |
+| `shoot` | 1362 | 1⚡ (0⚡, если весь стек уже ходил в этот ход — `tileShotIsFree`; автоконец хода ждёт такого залпа — `hasFreeShot`), стрелки в дальности (`volleyArmy`), цель должна быть видна (`canWatchTile` + `canSeeArmyOn`, при тумане), укрытие цели, штраф после марша, тяжёлая артиллерия после хода не стреляет; конные лучники сохраняют ход (kite); полное уничтожение гарнизона идёт через `clearMarch(to)` (не оставляет ложный `square`); возможна паника гарнизона |
 | `formSquare` / `breakSquare` | 1462 / 1476 | только наполеоника; нельзя разойти рядом с вражеской конницей |
 
 ## validate.ts — проверка входящих действий
@@ -110,7 +110,7 @@
 - `ERA_BUILDINGS` `:333`, `ERA_COMMANDERS` `:355`, `ERA_TECHS` `:371` + `buildingsFor/commandersFor/techsFor` `:387-412`.
 
 ## config.ts — баланс
-`MAX_PLAYERS=4`, `MIN_PLAYERS=2`, `MAX_ROUNDS=30`, `MAP_SIZES`, `ROUND_OPTIONS`, `ACTION_OPTIONS`, размеры гекса `:12-15`,
+`MAX_PLAYERS=4`, `MIN_PLAYERS=2`, `MAX_ROUNDS=30`, `MAP_SIZES`, `ROUND_OPTIONS`, `MIN_ACTIONS`/`MAX_ACTIONS` (1–20, шаг ±1 в лобби), размеры гекса `:12-15`,
 `BASE_ACTIONS=5`, `START_RESOURCES`, `CAPITAL_START_ARMY=6`, `CAPITAL_INCOME`, `ECONOMY_TECH_BONUS=0.15`, `STARVATION_DESERTION=0.15`,
 `TERRAIN` `:46`, `BUILDINGS` `:66` (farm, mine, market, palisade, fort, barracks), `TECHS` `:136`, `techCost` `:143`,
 `defaultGameSettings` `:141`, `PLAYER_COLORS` `:157`.

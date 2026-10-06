@@ -2,6 +2,8 @@ import {
   BUILDINGS,
   defaultGameSettings,
   MAP_SIZES,
+  MAX_ACTIONS,
+  MIN_ACTIONS,
   MAX_PLAYERS,
   PLAYER_COLORS,
   START_RESOURCES,
@@ -102,6 +104,7 @@ import {
   unitsFor,
   armyHasHeavyArtillery,
   tileHasMarched,
+  tileShotIsFree,
 } from './units.js';
 
 const EMPTY: Resources = { gold: 0, food: 0, iron: 0 };
@@ -445,7 +448,7 @@ function sanitizeSettings(patch: Partial<GameSettings>): Partial<GameSettings> {
     if (army != null) next.startArmy = army;
   }
   if (patch.actionsPerTurn != null) {
-    const actions = clampInt(patch.actionsPerTurn, 3, 8);
+    const actions = clampInt(patch.actionsPerTurn, MIN_ACTIONS, MAX_ACTIONS);
     if (actions != null) next.actionsPerTurn = actions;
   }
   if (patch.mode === 'empire' || patch.mode === 'wargame') next.mode = patch.mode;
@@ -2579,7 +2582,6 @@ function applyActionCore(state: GameState, playerId: string, action: GameAction)
     }
 
     case 'shoot': {
-      if (player.actionsLeft < 1) return { ok: false, error: 'Действия на ход закончились' };
       const from = tileAt(state, action.from.x, action.from.y);
       const to = tileAt(state, action.to.x, action.to.y);
       if (!from || !to) return { ok: false, error: 'Клетки не существует' };
@@ -2594,6 +2596,9 @@ function applyActionCore(state: GameState, playerId: string, action: GameAction)
       if (marched && armyHasHeavyArtillery(from.army, era(state))) {
         return { ok: false, error: 'Тяжёлая артиллерия после хода не стреляет' };
       }
+      // Стек уже ходил этим приказом — залп после хода ⚡ не берёт.
+      const freeShot = tileShotIsFree(from, era(state), speedBonus(from));
+      if (!freeShot && player.actionsLeft < 1) return { ok: false, error: 'Действия на ход закончились' };
       const range = armyRange(from.army, era(state), from.terrain);
       if (dist < 1 || dist > range) return { ok: false, error: 'Цель вне дальности' };
       if (to.ownerId === playerId) return { ok: false, error: 'Нельзя стрелять по своим' };
@@ -2629,7 +2634,7 @@ function applyActionCore(state: GameState, playerId: string, action: GameAction)
       const ratio = attackPower / Math.max(defensePower, 0.001);
       let losses = Math.min(defCount, Math.max(0, Math.round(defCount * Math.min(1, ratio * 0.55))));
       if (ratio < 2.2 && defCount > 1) losses = Math.min(losses, defCount - 1);
-      player.actionsLeft -= 1;
+      if (!freeShot) player.actionsLeft -= 1;
       const shooterStats = player.stats;
       shooterStats.unitsKilled += losses;
       const targetStats = stats(state, to.ownerId);
@@ -2764,12 +2769,33 @@ function hasFreeContinuingMarch(state: GameState, playerId: string): boolean {
   return false;
 }
 
+/** Стек уже ходил, ещё не стрелял и видит цель в досягаемости — залп без ⚡. */
+function hasFreeShot(state: GameState, playerId: string): boolean {
+  const eraId = era(state);
+  for (const from of state.tiles) {
+    if (from.ownerId !== playerId || from.routedTurns > 0 || from.shotsLeft < 1) continue;
+    if (!tileShotIsFree(from, eraId, speedBonus(from))) continue;
+    if (armyHasHeavyArtillery(from.army, eraId)) continue;
+    const range = armyRange(from.army, eraId, from.terrain);
+    if (range < 1) continue;
+    for (const to of state.tiles) {
+      if (!to.ownerId || to.ownerId === playerId || armyCount(to.army) < 1) continue;
+      const dist = hexDistance(from, to);
+      if (dist < 1 || dist > range || !atWar(state, playerId, to.ownerId)) continue;
+      if (armyCount(volleyArmy(from.army, eraId, dist, from.terrain)) < 1) continue;
+      if (canWatchTile(state, playerId, to) && canSeeArmyOn(state, playerId, to)) return true;
+    }
+  }
+  return false;
+}
+
 /** Действия закончились — ход завершается автоматически. */
 export function autoEndTurnIfExhausted(state: GameState): void {
   if (state.pendingSquare) return;
   const player = currentPlayer(state);
   if (state.phase !== 'playing' || !player || player.actionsLeft > 0) return;
   if (hasFreeContinuingMarch(state, player.id)) return;
+  if (hasFreeShot(state, player.id)) return;
   nextTurn(state);
 }
 

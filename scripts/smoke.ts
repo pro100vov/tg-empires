@@ -23,6 +23,7 @@ import {
   enterHaltsArmy,
   enterMoveCost,
   autoEndTurnIfExhausted,
+  MAX_ACTIONS,
   battleForecastRatio,
   chargePathOpen,
   canSeeArmyOn,
@@ -2109,6 +2110,44 @@ function checkShootNeedsVision(): void {
 }
 
 
+function checkShotAfterMoveIsFree(): void {
+  const state = newGame();
+  state.settings.fogOfWar = false;
+  const attacker = currentPlayer(state)!;
+  const defender = state.players.find((p) => p.id !== attacker.id)!;
+  const shooter = capitalOf(state, attacker.id);
+  const target = neighbors(state, shooter).find((t) => TERRAIN[t.terrain].passable)!;
+  target.ownerId = defender.id;
+  target.army = { medium_infantry: 20 };
+  // Стек уже ходил этим приказом: залп после хода ⚡ не берёт, и ход сам не кончается.
+  writeWings(shooter, [{ army: { medium_archer: 10 }, movesLeft: 0, shotsLeft: 1 }]);
+  attacker.actionsLeft = 0;
+  autoEndTurnIfExhausted(state);
+  assert.equal(currentPlayer(state)!.id, attacker.id, 'ход ждёт бесплатного залпа');
+  const free = applyAction(state, attacker.id, { type: 'shoot', from: shooter, to: target });
+  assert.ok(free.ok, free.ok ? '' : free.error);
+  assert.equal(attacker.actionsLeft, 0, 'залп после хода бесплатный');
+  // Не ходивший стек платит за залп как обычно.
+  target.army = { medium_infantry: 20 };
+  writeWings(shooter, [{ army: { medium_archer: 10 }, movesLeft: 1, shotsLeft: 1 }]);
+  attacker.actionsLeft = 0;
+  assert.equal(applyAction(state, attacker.id, { type: 'shoot', from: shooter, to: target }).ok, false, 'без хода залп стоит ⚡');
+  attacker.actionsLeft = 2;
+  assert.ok(applyAction(state, attacker.id, { type: 'shoot', from: shooter, to: target }).ok);
+  assert.equal(attacker.actionsLeft, 1, 'залп с места — 1⚡');
+  console.log('✓ залп после хода без ⚡');
+}
+
+function checkActionsStepper(): void {
+  const state = createGame('TEST1', 'p1', 1);
+  addPlayer(state, 'p1', 'Игрок 1');
+  assert.ok(applyLobbyAction(state, 'p1', { type: 'configure', settings: { actionsPerTurn: 11 } }).ok);
+  assert.equal(state.settings.actionsPerTurn, 11, 'любое число ⚡ в пределах');
+  applyLobbyAction(state, 'p1', { type: 'configure', settings: { actionsPerTurn: 99 } });
+  assert.equal(state.settings.actionsPerTurn, MAX_ACTIONS, 'сверху — потолок');
+  console.log('✓ действий за ход настраиваются +/−');
+}
+
 function newGameN(n: number, seed = 12345): GameState {
   const state = createGame('TEST1', 'p1', seed);
   for (let i = 1; i <= n; i++) addPlayer(state, `p${i}`, `Игрок ${i}`);
@@ -2992,6 +3031,8 @@ checkSurrender();
 checkLobbyHostReassign();
 checkForecastCommander();
 checkShootNeedsVision();
+checkShotAfterMoveIsFree();
+checkActionsStepper();
 checkLogFogRecruit();
 checkLogFogResearch();
 checkLogFogBattle();

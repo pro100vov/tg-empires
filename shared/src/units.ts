@@ -691,6 +691,12 @@ export function tileHasMarched(tile: Tile, era: EraId = 'ancient', speedBonus = 
   return ensureWings(tile).some((wing) => wingHasMarched(wing, era, speedBonus));
 }
 
+/** Весь стек уже получил приказ в этом раунде (ходил) — залп идёт в счёт того же ⚡. */
+export function tileShotIsFree(tile: Tile, era: EraId = 'ancient', speedBonus = 0): boolean {
+  const wings = ensureWings(tile).filter((wing) => armyCount(wing.army) > 0);
+  return wings.length > 0 && wings.every((wing) => wingHasMarched(wing, era, speedBonus));
+}
+
 /** Кто в стеке умеет стрелять (и, если задана дистанция, достаёт до цели). */
 export function volleyArmy(
   army: Army,
@@ -824,7 +830,8 @@ export function wingsAlreadyMarching(wings: MarchWing[], speedBonus = 0, era: Er
   if (wings.length < 1) return false;
   return wings.every((wing) => {
     const speed = armySpeed(wing.army, era) + speedBonus;
-    return wing.movesLeft > 0 && wing.movesLeft < speed;
+    // Уже ходили или уже стреляли (конные стрелки после залпа) — приказ оплачен.
+    return wing.movesLeft > 0 && (wing.movesLeft < speed || (wing.shotsLeft < 1 && armyCanKite(wing.army)));
   });
 }
 

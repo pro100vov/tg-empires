@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
-  ACTION_OPTIONS,
+  MAX_ACTIONS,
+  MIN_ACTIONS,
   ERA_IDS,
   ERAS,
   eraOf,
@@ -545,17 +546,15 @@ export default function Lobby({ state, me, onCreate, onSolo, onMine, onTutorial,
 
             <div className="setting-block">
               <div className="setting-label">Действий за ход</div>
-              <div className="choice-row">
-                {ACTION_OPTIONS.map((n) => (
-                  <button
-                    key={n}
-                    type="button"
-                    className={`choice${settings.actionsPerTurn === n ? ' selected' : ''}`}
-                    onClick={() => send({ type: 'configure', settings: { actionsPerTurn: n } })}
-                  >
-                    {n}⚡
-                  </button>
-                ))}
+              <div className="stepper-grid">
+                <Stepper
+                  label="⚡"
+                  value={settings.actionsPerTurn}
+                  min={MIN_ACTIONS}
+                  max={MAX_ACTIONS}
+                  step={1}
+                  onChange={(actionsPerTurn) => send({ type: 'configure', settings: { actionsPerTurn } })}
+                />
               </div>
             </div>
 

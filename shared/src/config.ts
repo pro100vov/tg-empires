@@ -7,7 +7,6 @@ export const MAX_ROUNDS = 30;
 export const MAP_SIZE = 10;
 export const MAP_SIZES = [8, 10, 12, 14] as const;
 export const ROUND_OPTIONS = [20, 30, 40, 50] as const;
-export const ACTION_OPTIONS = [3, 4, 5, 6] as const;
 /** Время на ход, мин: 0 — без лимита. */
 export const TURN_MINUTES_OPTIONS = [0, 2, 5, 60, 1440] as const;
 /** Ширина bounding-box pointy-top гекса, px. Высота = round(width * 2 / √3). */
@@ -16,6 +15,9 @@ export const HEX_HEIGHT = Math.round((HEX_WIDTH * 2) / Math.sqrt(3));
 export const HEX_COL_STEP = HEX_WIDTH;
 export const HEX_ROW_STEP = Math.round(HEX_HEIGHT * 0.75);
 export const BASE_ACTIONS = 5;
+/** Пределы настройки «Действий за ход» в лобби. */
+export const MIN_ACTIONS = 1;
+export const MAX_ACTIONS = 20;
 export const MAX_TECH_LEVEL = 5;
 export const MAX_LOGISTICS_LEVEL = 3;
 
