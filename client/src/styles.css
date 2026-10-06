@@ -2153,3 +2153,51 @@ input[type='range'] {
 .map-wrap {
   min-width: 0;
 }
+
+/* Варгейм: зоны расстановки и отдых отряда. */
+.tile.deploy-zone .tile-ring {
+  opacity: 0.85;
+}
+
+.tile-rest {
+  position: absolute;
+  left: 8px;
+  top: 10px;
+  font-size: 10px;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.deploy-ready-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.deploy-ready-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  opacity: 0.6;
+}
+
+.deploy-ready-chip.on {
+  opacity: 1;
+  font-weight: 700;
+}
+
+.deploy-panel {
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.deploy-panel .unit-grid {
+  margin: 6px 0;
+}
+
+.deploy-fort {
+  display: inline-flex;
+  gap: 4px;
+}

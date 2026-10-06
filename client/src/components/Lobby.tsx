@@ -10,10 +10,17 @@ import {
   ROUND_OPTIONS,
   TERRAIN,
   TURN_MINUTES_OPTIONS,
+  KILL_GOAL_MAX,
+  WAR_CAPITAL_MAX,
+  WAR_CAPITAL_MIN,
+  WAR_CAPITAL_STEP,
+  autoKillGoal,
   isHotseatRival,
   isLobbyAdmin,
+  isWargame,
+  zoneOwnerAt,
 } from '@tge/shared';
-import type { AiLevel, GameState, LobbyAction, MyGame, TerrainType } from '@tge/shared';
+import type { AiLevel, GameMode, GameState, LobbyAction, MyGame, TerrainType } from '@tge/shared';
 import { haptic } from '../telegram';
 import { AI_LABEL, leftLabel, turnMinutesHint, turnMinutesLabel } from '../labels';
 import MapBoard from './MapBoard';
@@ -25,12 +32,13 @@ export interface SoloOptions {
   ai?: AiLevel[];
   /** Учебная партия: маленькая карта, один лёгкий ИИ, старт сразу. */
   tutorial?: boolean;
+  mode?: GameMode;
 }
 
 interface Props {
   state: GameState | null;
   me: { id: string; name: string };
-  onCreate: () => void;
+  onCreate: (mode?: GameMode) => void;
   onSolo: (options?: SoloOptions) => void;
   onMine: () => Promise<MyGame[]>;
   onTutorial?: () => void;
@@ -97,11 +105,14 @@ export default function Lobby({ state, me, onCreate, onSolo, onMine, onTutorial,
                   ))}
                 </span>
                 <span className="grow muted small">
+                  {game.mode === 'wargame' ? '⚔️ ' : ''}
                   {game.phase === 'lobby'
                     ? 'лобби'
                     : game.phase === 'finished'
                       ? 'окончена'
-                      : `раунд ${game.round}/${game.maxRounds}${game.myTurn ? '' : ` · ходит ${game.turnName}`}`}
+                      : game.phase === 'deploy'
+                        ? 'расстановка армий'
+                        : `раунд ${game.round}/${game.maxRounds}${game.myTurn ? '' : ` · ходит ${game.turnName}`}`}
                   {game.phase === 'playing' && game.deadline ? ` · ⏱ ${leftLabel(game.deadline - Date.now())}` : ''}
                 </span>
                 {game.myTurn && <span className="badge-turn">Ваш ход</span>}
@@ -119,6 +130,19 @@ export default function Lobby({ state, me, onCreate, onSolo, onMine, onTutorial,
         >
           Создать партию
         </button>
+
+        <button
+          className="btn big"
+          onClick={() => {
+            haptic('medium');
+            onCreate('wargame');
+          }}
+        >
+          ⚔️ Варгейм
+        </button>
+        <p className="muted small center-text">
+          Без экономики: армия на стартовый капитал, расстановка вслепую — и сразу в бой.
+        </p>
 
         {soloMode === null && (
           <button
@@ -234,6 +258,18 @@ export default function Lobby({ state, me, onCreate, onSolo, onMine, onTutorial,
   const enough = state.players.length >= MIN_PLAYERS;
   const settings = state.settings;
   const era = eraOf(settings);
+  const war = isWargame(state);
+  const autoGoal = autoKillGoal(settings.warCapital);
+  const goalLabel = settings.killGoal < 0 ? `авто (${autoGoal})` : settings.killGoal === 0 ? 'выкл.' : String(settings.killGoal);
+  const zones = war
+    ? new Map(
+        state.tiles.flatMap((t) => {
+          const owner = zoneOwnerAt(state, t.x, t.y);
+          const color = owner ? state.players.find((p) => p.id === owner)?.color : undefined;
+          return color ? [[`${t.x},${t.y}`, color] as [string, string]] : [];
+        }),
+      )
+    : undefined;
 
   const send = (action: LobbyAction) => {
     haptic('light');
@@ -244,8 +280,10 @@ export default function Lobby({ state, me, onCreate, onSolo, onMine, onTutorial,
     <div className="screen menu lobby-setup">
       <div className="lobby-scroll">
       <div className="hero">
-        <div className="hero-icon">⚔️</div>
-        <h2>Комната {state.roomCode}</h2>
+        <div className="hero-icon">{war ? '🛡️' : '⚔️'}</div>
+        <h2>
+          {war ? 'Варгейм' : 'Комната'} {state.roomCode}
+        </h2>
         <p className="muted">
           {state.settings.hotseat
             ? 'Сам с собой: после хода экран переключается на другую державу.'
@@ -321,6 +359,7 @@ export default function Lobby({ state, me, onCreate, onSolo, onMine, onTutorial,
         <div className="panel-title">Настройки партии</div>
         {!canEdit && (
           <p className="muted small">
+            {war ? `⚔️ Варгейм · 🪙 ${settings.warCapital} · победа: ${settings.killGoal === 0 ? 'уничтожить всех' : `${settings.killGoal < 0 ? autoGoal : settings.killGoal} отр.`} · ` : ''}
             {ERAS[era].icon} {ERAS[era].name}
             {' · '}
             {settings.mapSize}×{settings.mapSize}
@@ -334,13 +373,83 @@ export default function Lobby({ state, me, onCreate, onSolo, onMine, onTutorial,
             {settings.actionsPerTurn}⚡
             {' · '}
             ⏱ {turnMinutesLabel(settings.turnMinutes)}
-            {settings.randomEvents ? ' · 🎲 события' : ''}
-            {settings.diplomacy ? ' · 🤝 дипломатия' : ''}
+            {!war && settings.randomEvents ? ' · 🎲 события' : ''}
+            {!war && settings.diplomacy ? ' · 🤝 дипломатия' : ''}
           </p>
         )}
 
         {canEdit && (
           <>
+            <div className="setting-block">
+              <div className="setting-label">Режим</div>
+              <div className="choice-row">
+                <button
+                  type="button"
+                  className={`choice${!war ? ' selected' : ''}`}
+                  onClick={() => send({ type: 'configure', settings: { mode: 'empire' } })}
+                >
+                  🏰 Империя
+                </button>
+                <button
+                  type="button"
+                  className={`choice${war ? ' selected' : ''}`}
+                  onClick={() => send({ type: 'configure', settings: { mode: 'wargame' } })}
+                >
+                  ⚔️ Варгейм
+                </button>
+              </div>
+              <p className="muted small">
+                {war
+                  ? 'Армия покупается на капитал, расстановка вслепую у своего края, без экономики. Потрёпанный отряд пополняется за 2 хода покоя.'
+                  : 'Экономика, стройка, технологии и захват земли.'}
+              </p>
+            </div>
+
+            {war && (
+              <div className="setting-block">
+                <div className="setting-label">Капитал и победа</div>
+                <div className="stepper-grid">
+                  <Stepper
+                    label="🪙"
+                    value={settings.warCapital}
+                    min={WAR_CAPITAL_MIN}
+                    max={WAR_CAPITAL_MAX}
+                    step={WAR_CAPITAL_STEP}
+                    onChange={(warCapital) => send({ type: 'configure', settings: { warCapital } })}
+                  />
+                </div>
+                <div className="setting-label">Уничтожить отрядов для победы: {goalLabel}</div>
+                <div className="choice-row wrap">
+                  <button
+                    type="button"
+                    className={`choice${settings.killGoal < 0 ? ' selected' : ''}`}
+                    onClick={() => send({ type: 'configure', settings: { killGoal: -1 } })}
+                  >
+                    Авто ({autoGoal})
+                  </button>
+                  <button
+                    type="button"
+                    className={`choice${settings.killGoal === 0 ? ' selected' : ''}`}
+                    onClick={() => send({ type: 'configure', settings: { killGoal: 0 } })}
+                  >
+                    Уничтожить всех
+                  </button>
+                  <Stepper
+                    label="⚔️"
+                    value={settings.killGoal > 0 ? settings.killGoal : autoGoal}
+                    min={1}
+                    max={KILL_GOAL_MAX}
+                    step={1}
+                    onChange={(killGoal) => send({ type: 'configure', settings: { killGoal } })}
+                  />
+                </div>
+                <p className="muted small">
+                  Армию, потерявшую все отряды, выбивают из игры. Кончились раунды — побеждает тот, кто уничтожил
+                  больше отрядов.
+                </p>
+              </div>
+            )}
+
             <div className="setting-block">
               <div className="setting-label">Эпоха</div>
               <div className="choice-row wrap">
@@ -467,6 +576,8 @@ export default function Lobby({ state, me, onCreate, onSolo, onMine, onTutorial,
               <p className="muted small">{turnMinutesHint(settings.turnMinutes)}</p>
             </div>
 
+            {!war && (
+            <>
             <div className="setting-block">
               <div className="setting-label">Правила</div>
               <div className="choice-row wrap">
@@ -526,6 +637,8 @@ export default function Lobby({ state, me, onCreate, onSolo, onMine, onTutorial,
                 />
               </div>
             </div>
+            </>
+            )}
           </>
         )}
       </div>
@@ -551,6 +664,7 @@ export default function Lobby({ state, me, onCreate, onSolo, onMine, onTutorial,
           meId={me.id}
           selected={null}
           highlighted={new Set()}
+          zones={zones}
           fx={null}
           onPick={(tile) => {
             if (!canEdit) return;
@@ -560,7 +674,9 @@ export default function Lobby({ state, me, onCreate, onSolo, onMine, onTutorial,
       </div>
       {canEdit && (
         <p className="muted small center-text">
-          Жёлтые кольца — столицы. Кисть красит гекс; случайную карту можно подправить.
+          {war
+            ? 'Цветные кромки — зоны расстановки игроков. Кисть красит гекс; случайную карту можно подправить.'
+            : 'Жёлтые кольца — столицы. Кисть красит гекс; случайную карту можно подправить.'}
         </p>
       )}
       </div>

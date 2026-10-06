@@ -19,6 +19,13 @@ export const BASE_ACTIONS = 5;
 export const MAX_TECH_LEVEL = 5;
 export const MAX_LOGISTICS_LEVEL = 3;
 
+/** Варгейм: капитал по умолчанию и пределы в лобби. */
+export const WAR_CAPITAL = 500;
+export const WAR_CAPITAL_MIN = 200;
+export const WAR_CAPITAL_MAX = 2000;
+export const WAR_CAPITAL_STEP = 100;
+export const KILL_GOAL_MAX = 30;
+
 export const START_RESOURCES: Resources = { gold: 70, food: 40, iron: 25 };
 export const CAPITAL_START_ARMY = 6;
 
@@ -159,6 +166,9 @@ export function defaultGameSettings(): GameSettings {
     turnMinutes: 0,
     randomEvents: true,
     diplomacy: true,
+    mode: 'empire',
+    warCapital: WAR_CAPITAL,
+    killGoal: -1,
   };
 }
 
@@ -176,5 +186,7 @@ export function emptyStats(): PlayerStats {
     eventsGood: 0,
     eventsBad: 0,
     biggestBattle: 0,
+    squadsKilled: 0,
+    squadsLost: 0,
   };
 }

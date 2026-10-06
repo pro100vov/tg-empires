@@ -111,3 +111,10 @@ Payload каждого действия сначала проходит `parseGa
 - Socket-события: `me` (`{id,name,canNotify}`), `room:mine`, `room:rematch`, `user:write`, `room:solo` с `{ai:[...], tutorial}`.
 - Бот: `/games`, `/notify on|off`, callback `rematch:КОД`, `dip:a|d:КОД:ОТ`.
 - Состояние приходит с `serverNow` (сверка обратного отсчёта).
+
+## Варгейм
+
+- `room:create {mode}` и `room:solo {mode}` — `createRoom(hostId, mode)` (`rooms.ts`).
+- `deploy:action {action}` — `parseDeployAction` → `applyDeployAction(state, actingPlayerId)`, ответ + рассылка.
+- `sweep()`: в фазе `deploy` не вернувшийся > `LOBBY_GRACE_MS` игрок получает автозакупку и «Готов» (`forceDeployReady`).
+- Бот: `/wargame` — комната в режиме варгейма; `/games` подписывает расстановку. `MyGame.mode`.

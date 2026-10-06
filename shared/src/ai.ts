@@ -58,6 +58,7 @@ import {
   MOVED_VOLLEY,
 } from './units.js';
 import { publicView, rememberSeenBuildings } from './vision.js';
+import { WAR_FORTS, enemyZoneCenters, isWargame } from './wargame.js';
 import type { ActionResult, AiLevel, Army, BuildingType, Coord, EraId, GameAction, GameState, Player, Resources, TechType, Tile, UnitClass, UnitId } from './types.js';
 
 interface Tuning {
@@ -1288,6 +1289,7 @@ export function aiStrategyOf(view: GameState, aiId: string): AiStrategy | null {
 export function planAiTurn(view: GameState, aiId: string): GameAction[] {
   const me = playerById(view, aiId);
   if (!me || !me.alive || view.phase !== 'playing') return [];
+  if (isWargame(view)) return planWargameTurn(view, me);
   const ctx = buildCtx(view, me);
   const cands: Cand[] = [];
 
@@ -1320,6 +1322,95 @@ export function planAiTurn(view: GameState, aiId: string): GameAction[] {
   const plan = cands.slice(0, 8).map((c) => c.action);
   plan.push({ type: 'endTurn' });
   return plan;
+}
+
+// ── Варгейм: только бой ──────────────────────────────────────────────────────
+
+/** Ход ИИ в варгейме: удары и залпы, укрепления у фронта, сближение с врагом; потрёпанные отдыхают. */
+function planWargameTurn(view: GameState, me: Player): GameAction[] {
+  if (view.pendingSquare) return [];
+  const ctx = buildCtx(view, me);
+  const cands: Cand[] = [];
+  if (me.actionsLeft > 0) {
+    cands.push(...attackCands(ctx), ...volleyCands(ctx), ...squareCands(ctx), ...warFortCands(ctx));
+  }
+  cands.push(...warAdvanceCands(ctx));
+  cands.sort((a, b) => b.score - a.score);
+  if (ctx.t.skip > 0 && cands.length > 1 && ctx.rand() < ctx.t.skip) cands.splice(0, 1);
+  const plan = cands.slice(0, 8).map((c) => c.action);
+  plan.push({ type: 'endTurn' });
+  return plan;
+}
+
+/** Расстояния до целей по пустым клеткам: свои отряды тоже преграда (вдвоём на клетку нельзя). */
+function warField(ctx: Ctx, targets: Coord[]): Map<string, number> {
+  const dist = new Map<string, number>();
+  const queue: Coord[] = [];
+  for (const t of targets) {
+    if (dist.has(key(t))) continue;
+    dist.set(key(t), 0);
+    queue.push(t);
+  }
+  for (let i = 0; i < queue.length; i++) {
+    const cur = queue[i]!;
+    const d = dist.get(key(cur))!;
+    for (const n of neighbors(ctx.view, cur)) {
+      const k = key(n);
+      if (dist.has(k) || !TERRAIN[n.terrain].passable) continue;
+      dist.set(k, d + 1);
+      if (armyCount(n.army) === 0) queue.push(n);
+    }
+  }
+  return dist;
+}
+
+function warAdvanceCands(ctx: Ctx): Cand[] {
+  const out: Cand[] = [];
+  const { view, me } = ctx;
+  const targets: Coord[] = ctx.enemies.length > 0 ? ctx.enemies : enemyZoneCenters(view, me.id);
+  if (targets.length === 0) return out;
+  const field = warField(ctx, targets);
+  for (const from of ctx.stacks) {
+    if (from.routedTurns > 0 || from.movesLeft < 1 || squarePinned(view, from)) continue;
+    const count = armyCount(from.army);
+    const size = from.squad?.size ?? count;
+    // Потрёпанный отряд вдали от врага стоит и лечится.
+    const nearEnemy = ctx.enemies.some((e) => hexDistance(e, from) <= 2);
+    if (count * 2 <= size && !nearEnemy) continue;
+    // Стрелок, до которого уже достаёт залп, не лезет вперёд.
+    const range = armyRange(from.army, ctx.era, from.terrain);
+    if (range > 0 && ctx.enemies.some((e) => hexDistance(e, from) <= range)) continue;
+    const d = field.get(key(from));
+    if (d === undefined || d <= 1) continue;
+    const free = isFreeMove(ctx, from, count);
+    if (!free && me.actionsLeft < 1) continue;
+    const vs = threatAround(ctx, from, 1).vs;
+    const next = neighbors(view, from)
+      .filter((t) => TERRAIN[t.terrain].passable && armyCount(t.army) === 0 && (field.get(key(t)) ?? 99) < d)
+      .filter((t) => !ctx.t.cautious || dangerAt(ctx, t) <= defensePowerAt(ctx, from.army, t, vs) * 1.2)
+      .sort((a, b) => (field.get(key(a)) ?? 99) - (field.get(key(b)) ?? 99) || (b.terrain === 'hills' ? 1 : 0) - (a.terrain === 'hills' ? 1 : 0))[0];
+    if (!next) continue;
+    // Конница быстрее — пусть ждёт пехоту, если впереди далеко (не рвётся в одиночку).
+    const mounted = armySpeed(from.army, ctx.era) >= 2;
+    out.push({ action: moveAction(from, next, count), score: (free ? 560 : 220) + (mounted ? -15 : 0) - d });
+  }
+  return out;
+}
+
+/** Купленное укрепление ставит пехота или стрелки, когда враг близко. */
+function warFortCands(ctx: Ctx): Cand[] {
+  const forts = (ctx.me.forts ?? []).filter((b) => WAR_FORTS.includes(b));
+  if (forts.length === 0 || ctx.enemies.length === 0) return [];
+  const best = forts.includes('fort') ? 'fort' : forts[0]!;
+  const out: Cand[] = [];
+  for (const tile of ctx.stacks) {
+    if (tile.building || tile.construction || tile.routedTurns > 0) continue;
+    if (armySpeed(tile.army, ctx.era) >= 2) continue;
+    const near = Math.min(...ctx.enemies.map((e) => hexDistance(e, tile)));
+    if (near < 2 || near > 4) continue;
+    out.push({ action: { type: 'build', at: { x: tile.x, y: tile.y }, building: best }, score: 240 + (tile.terrain === 'hills' ? 10 : 0) });
+  }
+  return out;
 }
 
 /** Ответ обороны ИИ на предложение каре. */

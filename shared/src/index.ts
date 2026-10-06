@@ -11,3 +11,4 @@ export * from './vision.js';
 export * from './engine.js';
 export * from './ai.js';
 export * from './validate.js';
+export * from './wargame.js';

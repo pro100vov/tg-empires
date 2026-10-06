@@ -87,6 +87,7 @@ scripts/abuse.ts        кривые payload'ы против локальног�
 | Доход | `computeIncome` `:442`; содержание `upkeepFor` `:476` |
 | Очки и победа | `scoreOf` `:595`, `finish` `:610`, `finishByScore` `:617` |
 | Уничтожение державы (взята столица) | `eliminate` `:626` |
+| Сдача | `case 'surrender'` в `applyAction` → `applySurrender` (земли — сильнейшему живому; можно не в свой ход) |
 | Автоконец хода при 0 действий | `autoEndTurnIfExhausted` `:1531` |
 | Лобби: игроки | `addPlayer` `:234`, `removePlayer` `:266` (опустевшее лобби → хост = следующий вошедший) |
 | Лобби: настройки, рисование, reroll, админы | `applyLobbyAction` `:338`, валидация `sanitizeSettings` `:298` |
@@ -157,6 +158,7 @@ scripts/abuse.ts        кривые payload'ы против локальног�
 | Окно стройки | `BuildSheet` `GameScreen.tsx:1230` |
 | Окно командира | `CommanderSheet` `GameScreen.tsx:1276` |
 | Диалог каре / экран победы | `GameScreen.tsx:831-869` |
+| Сдаться | `GameScreen.tsx` кнопка 🏳️ в topbar + подтверждение → `{ type: 'surrender' }` |
 | Подсказки по статам юнитов | `GameScreen.tsx:94-245` |
 | Рисование тайла (иконки, туман, столица, стройка) | `MapBoard.tsx:140-260` |
 | Центрирование на столице | `MapBoard.tsx:72-95` |
@@ -180,3 +182,19 @@ scripts/abuse.ts        кривые payload'ы против локальног�
 ## Новые файлы (план функций 2026-09-29)
 
 `server/src/`: storage, users, notify, turnClock, rematch, aiRunner, hub. `shared/src/`: events, diplomacy, ai. `client/src/`: labels.ts; components — LogSheet, EndScreen, EventCard, DiplomacySheet, MiniMap, Tutorial. Номера строк выше могли сдвинуться в `engine.ts` — ищи по имени функции. Подробности — в конце `server.md`, `engine.md`, `client.md`.
+
+### Варгейм (`shared/src/wargame.ts`)
+| Задача | Где |
+|---|---|
+| Цены отрядов/командиров/укреплений, размер отряда | `wargame.ts` `SQUAD_SIZE`, `squadPrice`, `commanderPrice`, `fortPrice` |
+| Зоны расстановки | `wargame.ts` `zoneOwnerAt`, `deployZone` |
+| Закупка и «Готов» | `engine.ts` `applyDeployAction` → `wargame.ts deployStep`; старт — `startDeploy`, `beginBattle` |
+| Автозакупка (ИИ, «Авто», офлайн) | `wargame.ts autoDeploy`, `engine.ts forceDeployReady` |
+| Счёт убитых отрядов, выбывание, победа | `engine.ts` `applyAction` (обёртка) → `settleWargame` |
+| Лечение отрядов | `engine.ts restSquads` (из `nextTurn`) |
+| Укрепление из запаса | `engine.ts placeWarFort` |
+| ИИ в бою | `ai.ts planWargameTurn`, `warAdvanceCands`, `warFortCands` |
+| Экран закупки | `client/src/components/DeployScreen.tsx` |
+| Настройки в лобби | `Lobby.tsx` блоки «Режим», «Капитал и победа» |
+| Сервер / бот | `index.ts` `deploy:action`, `sweep` (фаза deploy); `bot.ts /wargame` |
+| Тесты | `scripts/wargame-checks.ts` |

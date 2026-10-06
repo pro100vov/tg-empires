@@ -14,6 +14,8 @@ import {
   dominantUnit,
   hexBoardSize,
   hexTileBox,
+  deployZone,
+  isWargame,
   relationOf,
   takeArmy,
   unitShotKind,
@@ -38,6 +40,8 @@ interface Props {
   chargeHighlighted?: Set<string>;
   supportHighlighted?: Set<string>;
   highlightKind?: 'move' | 'shoot';
+  /** Варгейм: подсветить зоны расстановки (в лобби — все, в расстановке — свою). */
+  zones?: Map<string, string>;
   fx: GameFx | null;
   onPick: (tile: Tile) => void;
 }
@@ -71,7 +75,7 @@ function ShootBurst({ kind }: { kind: ShotKind }) {
 }
 
 const MapBoard = forwardRef<MapHandle, Props>(function MapBoard(
-  { state, meId, selected, highlighted, chargeHighlighted, supportHighlighted, highlightKind = 'move', fx, onPick },
+  { state, meId, selected, highlighted, chargeHighlighted, supportHighlighted, highlightKind = 'move', zones, fx, onPick },
   ref,
 ) {
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -113,7 +117,12 @@ const MapBoard = forwardRef<MapHandle, Props>(function MapBoard(
     if (!viewport) return;
     const mineIdx = state.players.findIndex((p) => p.id === meId);
     const spots = capitalSpots(state.width, Math.max(MIN_PLAYERS, state.players.length));
-    const spot = (mineIdx >= 0 ? spots[mineIdx] : spots[0]) ?? { x: 1, y: 1 };
+    let spot = (mineIdx >= 0 ? spots[mineIdx] : spots[0]) ?? { x: 1, y: 1 };
+    if (isWargame(state) && mineIdx >= 0) {
+      // Варгейм: столиц нет — смотрим на середину своей зоны.
+      const zone = deployZone(state, meId);
+      if (zone.length > 0) spot = zone[Math.floor(zone.length / 2)]!;
+    }
     const capital =
       state.tiles.find((tile) => tile.capitalOf === meId) ??
       state.tiles.find((tile) => tile.x === spot.x && tile.y === spot.y);
@@ -157,7 +166,7 @@ const MapBoard = forwardRef<MapHandle, Props>(function MapBoard(
   const commanders = commandersFor(era);
 
   const lobbyCapitals =
-    state.phase === 'lobby'
+    state.phase === 'lobby' && !isWargame(state)
       ? new Set(
           capitalSpots(state.width, Math.max(MIN_PLAYERS, state.players.length)).map((c) => coordKey(c)),
         )
@@ -205,6 +214,8 @@ const MapBoard = forwardRef<MapHandle, Props>(function MapBoard(
             if (tile.building) classes.push('has-building');
             if (tile.construction) classes.push('has-construction');
             if (lobbyCapitals?.has(key)) classes.push('capital-spot');
+            const zoneColor = zones?.get(key);
+            if (zoneColor) classes.push('deploy-zone');
             if (state.phase === 'playing' && owner?.id !== meId && !canWatchTile(state, meId, tile)) {
               classes.push('fog');
             }
@@ -223,7 +234,12 @@ const MapBoard = forwardRef<MapHandle, Props>(function MapBoard(
                   ? '#f2d36b'
                   : owner
                     ? owner.color
-                    : 'rgba(0,0,0,0.55)';
+                    : zoneColor
+                      ? zoneColor
+                      : 'rgba(0,0,0,0.55)';
+            const squadSize = tile.squad?.size ?? 0;
+            const damaged = isWargame(state) && squadSize > count && count > 0;
+            const resting = damaged && tile.ownerId === meId && (tile.squad?.rest ?? 0) > 0;
 
             return (
               <button
@@ -275,8 +291,13 @@ const MapBoard = forwardRef<MapHandle, Props>(function MapBoard(
                       {unit.icon}
                     </span>
                     <span className="tile-army" style={{ background: owner?.color ?? '#333' }}>
-                      {count}
+                      {damaged ? `${count}/${squadSize}` : count}
                     </span>
+                    {resting && (
+                      <span className="tile-rest" title="Отряд отдыхает и пополнится">
+                        💤
+                      </span>
+                    )}
                     {mineTurn && mp.max > 0 && (
                       <span
                         className="tile-mp"

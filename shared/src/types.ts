@@ -58,6 +58,18 @@ export interface Tile {
   square?: boolean;
   /** Группы с разным запасом хода на одной клетке (слияние не смешивает усталость). */
   wings?: MarchWing[];
+  /** Варгейм: отряд на клетке — исходный размер и покой для лечения. */
+  squad?: Squad | null;
+}
+
+/** Варгейм: купленный отряд одного рода. Едет вместе с армией клетки. */
+export interface Squad {
+  /** Сколько юнитов было при покупке — до стольких отряд лечится. */
+  size: number;
+  /** Ходов владельца подряд без хода, залпа и боя. */
+  rest: number;
+  /** В этот ход отряд действовал или был атакован. */
+  active?: boolean;
 }
 
 export interface MarchWing {
@@ -82,6 +94,10 @@ export interface PlayerStats {
   eventsBad: number;
   /** Сколько отрядов было в самой крупной битве игрока (обе стороны). */
   biggestBattle: number;
+  /** Варгейм: уничтоженные вражеские отряды целиком. */
+  squadsKilled: number;
+  /** Варгейм: свои отряды, погибшие целиком. */
+  squadsLost: number;
 }
 
 /** Действующий на игрока эффект случайного события. */
@@ -131,9 +147,15 @@ export interface Player {
   deadRound?: number;
   /** Победил в союзе с победителем партии. */
   alliedWinner?: boolean;
+  /** Варгейм: закончил закупку и расстановку. */
+  deployReady?: boolean;
+  /** Варгейм: купленные, но ещё не поставленные укрепления. */
+  forts?: BuildingType[];
 }
 
-export type GamePhase = 'lobby' | 'playing' | 'finished';
+export type GamePhase = 'lobby' | 'deploy' | 'playing' | 'finished';
+/** Империя — экономика и захват земли; варгейм — армия на капитал и чистый бой. */
+export type GameMode = 'empire' | 'wargame';
 export type TerrainMode = 'random' | 'custom';
 
 export interface GameSettings {
@@ -156,6 +178,11 @@ export interface GameSettings {
   randomEvents: boolean;
   /** Перемирия и союзы. */
   diplomacy: boolean;
+  mode: GameMode;
+  /** Варгейм: стартовый капитал в золоте. */
+  warCapital: number;
+  /** Варгейм: победа за N уничтоженных отрядов; 0 — выкл., −1 — авто от капитала. */
+  killGoal: number;
 }
 
 /** Атака конницы по пехоте ждёт ответа обороны: встать в каре или встретить в линии. */
@@ -260,7 +287,8 @@ export type GameAction =
   | { type: 'acceptProposal'; id: string }
   | { type: 'declineProposal'; id: string }
   | { type: 'breakTreaty'; with: string }
-  | { type: 'endTurn' };
+  | { type: 'endTurn' }
+  | { type: 'surrender' };
 
 export type LobbyAction =
   | { type: 'configure'; settings: Partial<GameSettings> }
@@ -269,6 +297,18 @@ export type LobbyAction =
   | { type: 'setAdmin'; playerId: string; admin: boolean }
   | { type: 'addAi'; difficulty: AiLevel }
   | { type: 'removeAi'; playerId: string };
+
+/** Варгейм: закупка и расстановка до боя. */
+export type DeployAction =
+  | { type: 'buySquad'; at: Coord; unit: UnitId }
+  | { type: 'sellSquad'; at: Coord }
+  | { type: 'buyCommander'; at: Coord; commander: CommanderId }
+  | { type: 'sellCommander'; at: Coord }
+  | { type: 'buyFort'; building: BuildingType }
+  | { type: 'sellFort'; building: BuildingType }
+  | { type: 'auto' }
+  | { type: 'clear' }
+  | { type: 'ready'; ready: boolean };
 
 export type GameFx = {
   kind: 'move' | 'shoot' | 'charge';
@@ -293,6 +333,7 @@ export interface RoomSummary {
 export interface MyGame {
   roomCode: string;
   phase: GamePhase;
+  mode?: GameMode;
   round: number;
   maxRounds: number;
   players: { name: string; color: string }[];

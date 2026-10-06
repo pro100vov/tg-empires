@@ -9,6 +9,7 @@ import type {
   BuildingType,
   CommanderId,
   Coord,
+  DeployAction,
   GameAction,
   GameSettings,
   LobbyAction,
@@ -37,6 +38,7 @@ const GAME_ACTION_TYPES = [
   'declineProposal',
   'breakTreaty',
   'endTurn',
+  'surrender',
 ] as const;
 const LOBBY_ACTION_TYPES = ['configure', 'paint', 'reroll', 'setAdmin', 'addAi', 'removeAi'] as const;
 const AI_LEVELS: AiLevel[] = ['easy', 'normal', 'hard'];
@@ -180,6 +182,8 @@ export function parseGameAction(raw: unknown): GameAction | null {
     }
     case 'endTurn':
       return { type: 'endTurn' };
+    case 'surrender':
+      return { type: 'surrender' };
     default:
       return null;
   }
@@ -220,6 +224,50 @@ export function parseLobbyAction(raw: unknown): LobbyAction | null {
       if (!playerId) return null;
       return { type: 'removeAi', playerId };
     }
+    default:
+      return null;
+  }
+}
+
+const DEPLOY_ACTION_TYPES = ['buySquad', 'sellSquad', 'buyCommander', 'sellCommander', 'buyFort', 'sellFort', 'auto', 'clear', 'ready'] as const;
+
+/** Закупка варгейма: тип, клетка, род войск/командир/укрепление из белых списков. */
+export function parseDeployAction(raw: unknown): DeployAction | null {
+  if (!isPlainObject(raw)) return null;
+  const type = raw.type;
+  if (typeof type !== 'string' || !(DEPLOY_ACTION_TYPES as readonly string[]).includes(type)) return null;
+  switch (type as DeployAction['type']) {
+    case 'buySquad': {
+      const at = parseCoord(raw.at);
+      const unit = raw.unit;
+      if (!at || typeof unit !== 'string' || !(UNIT_IDS as string[]).includes(unit)) return null;
+      return { type: 'buySquad', at, unit: unit as UnitId };
+    }
+    case 'sellSquad':
+    case 'sellCommander': {
+      const at = parseCoord(raw.at);
+      if (!at) return null;
+      return { type: type as 'sellSquad' | 'sellCommander', at };
+    }
+    case 'buyCommander': {
+      const at = parseCoord(raw.at);
+      const commander = raw.commander;
+      if (!at || typeof commander !== 'string' || !(COMMANDER_IDS as string[]).includes(commander)) return null;
+      return { type: 'buyCommander', at, commander: commander as CommanderId };
+    }
+    case 'buyFort':
+    case 'sellFort': {
+      const building = raw.building;
+      if (typeof building !== 'string' || !(BUILDING_IDS as string[]).includes(building)) return null;
+      return { type: type as 'buyFort' | 'sellFort', building: building as BuildingType };
+    }
+    case 'auto':
+      return { type: 'auto' };
+    case 'clear':
+      return { type: 'clear' };
+    case 'ready':
+      if (typeof raw.ready !== 'boolean') return null;
+      return { type: 'ready', ready: raw.ready };
     default:
       return null;
   }

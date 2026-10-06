@@ -109,6 +109,7 @@ function hideArmy(tile: Tile): Tile {
     shotsLeft: 0,
     wings: [],
     square: false,
+    squad: null,
   };
 }
 
@@ -148,6 +149,7 @@ function maskTile(state: GameState, viewerId: string, tile: Tile): Tile {
 
 /** Копия состояния без чужих войск и неувиденных построек. Не мутирует оригинал. */
 export function maskStateFor(state: GameState, viewerId: string): GameState {
+  if (state.phase === 'deploy') return maskDeployFor(state, viewerId);
   if (state.phase !== 'playing') return state;
   if (state.settings?.fogOfWar === false) return state;
   return {
@@ -166,6 +168,7 @@ export function maskStateFor(state: GameState, viewerId: string): GameState {
             recentEvents: [],
             eventCooldown: 0,
             event: null,
+            forts: [],
           },
     ),
     // Журнал: записи, привязанные к скрытым туманом делам, чужим не отдаём.
@@ -176,6 +179,19 @@ export function maskStateFor(state: GameState, viewerId: string): GameState {
       players: point.players[viewerId] ? { [viewerId]: point.players[viewerId]! } : {},
     })),
     records: {},
+  };
+}
+
+/** Варгейм, расстановка вслепую: чужие отряды, золото и укрепления не видны вовсе. */
+function maskDeployFor(state: GameState, viewerId: string): GameState {
+  return {
+    ...state,
+    tiles: state.tiles.map((tile) =>
+      tile.ownerId && tile.ownerId !== viewerId ? { ...hideArmy(tile), ownerId: null, squad: null } : tile,
+    ),
+    players: state.players.map((player) =>
+      player.id === viewerId ? player : { ...player, resources: { gold: 0, food: 0, iron: 0 }, forts: [] },
+    ),
   };
 }
 

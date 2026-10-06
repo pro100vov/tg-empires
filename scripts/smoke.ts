@@ -83,6 +83,7 @@ import {
   techCostFor,
 } from '../shared/src/index.js';
 import type { AiLevel, EventContext, GameState, Tile } from '../shared/src/index.js';
+import { runWargameChecks } from './wargame-checks.js';
 
 function capitalOf(state: GameState, playerId: string): Tile {
   const tile = state.tiles.find((t) => t.capitalOf === playerId);
@@ -1903,6 +1904,7 @@ function checkValidateActions(): void {
   );
   assert.ok(parseGameAction({ type: 'endTurn' }), 'корректный endTurn проходит');
   assert.ok(parseGameAction({ type: 'squareReply', form: true }), 'корректный squareReply проходит');
+  assert.ok(parseGameAction({ type: 'surrender' }), 'корректный surrender проходит');
 
   const badLobby: unknown[] = [
     null,
@@ -2002,6 +2004,39 @@ function checkEliminateClearsSquare(): void {
   assert.equal(outpost.ownerId, attacker.id, 'земли павшей державы переходят победителю');
   assert.equal(outpost.square, false, 'каре павшей державы не достаётся победителю');
   console.log('✓ падение державы снимает её каре');
+}
+
+function checkSurrender(): void {
+  // 1v1: сдача завершает партию, земли — сопернику.
+  const duel = newGame();
+  const p1 = currentPlayer(duel)!;
+  const p2 = duel.players.find((p) => p.id !== p1.id)!;
+  const offTurn = applyAction(duel, p2.id, { type: 'surrender' });
+  assert.ok(offTurn.ok, 'сдаться можно не в свой ход');
+  assert.equal(p2.alive, false);
+  assert.equal(duel.phase, 'finished');
+  assert.equal(duel.winnerId, p1.id);
+  assert.ok(
+    duel.tiles.every((t) => t.ownerId !== p2.id),
+    'у сдавшихся не осталось клеток',
+  );
+  assert.ok(
+    duel.tiles.some((t) => t.ownerId === p1.id && t.capitalOf == null),
+    'бывшая столица сдавшихся перешла победителю без статуса столицы',
+  );
+
+  // 3 игрока: сдача не заканчивает партию, ход переходит дальше.
+  const trio = newGameN(3);
+  const starter = currentPlayer(trio)!;
+  const others = trio.players.filter((p) => p.id !== starter.id);
+  const result = applyAction(trio, starter.id, { type: 'surrender' });
+  assert.ok(result.ok);
+  assert.equal(starter.alive, false);
+  assert.equal(trio.phase, 'playing', 'при 3+ игроках партия продолжается');
+  assert.notEqual(currentPlayer(trio)?.id, starter.id, 'ход ушёл сдавшемуся');
+  const heirTiles = trio.tiles.filter((t) => t.ownerId === others[0]!.id || t.ownerId === others[1]!.id);
+  assert.ok(heirTiles.length > 0, 'земли сдавшихся кому-то отошли');
+  console.log('✓ сдача работает в 1v1 и при 3 игроках');
 }
 
 function checkLobbyHostReassign(): void {
@@ -2953,6 +2988,7 @@ checkHexGrid();
 checkSquareOfferNeedsAction();
 checkSquareReplyFailSafe();
 checkEliminateClearsSquare();
+checkSurrender();
 checkLobbyHostReassign();
 checkForecastCommander();
 checkShootNeedsVision();
@@ -2985,4 +3021,5 @@ checkAiNoFogCheat();
 checkAiHardBeatsEasy();
 checkAiRiderRush();
 checkAiDiplomacyAndEvents();
+runWargameChecks();
 console.log('\nВсе проверки правил пройдены.');

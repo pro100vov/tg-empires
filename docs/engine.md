@@ -13,7 +13,7 @@
 - `Player` `:69` — `resources {gold,food,iron}, tech {attack,defense,economy,logistics}, actionsLeft, alive, connected, seenBuildings`.
 - `Army` = `Partial<Record<UnitId, number>>` — сколько отрядов каждого рода.
 - `GameSettings` `:85` — настройки лобби (размер карты, режим рельефа, туман, раунды, старт, действия, hotseat, эпоха).
-- `GameAction` `:140` — `move | shoot | build | recruit | appoint | research | formSquare | breakSquare | squareReply | endTurn`.
+- `GameAction` — `move | shoot | build | recruit | appoint | research | formSquare | breakSquare | squareReply | eventChoice | propose | acceptProposal | declineProposal | breakTreaty | endTurn | surrender`.
 - `LobbyAction` `:152` — `configure | paint | reroll | setAdmin`.
 - `GameFx` `:158` — описание анимации последнего действия (move/shoot/charge + исход боя).
 
@@ -144,3 +144,18 @@
 - `events.ts` — таблица 24 событий и `pickEvent`; применение — `applyEventEffect`/`rollEvent`/`startEvent` в engine (бросок в конце `beginTurn`, с 3-го раунда, 25 %, пауза 2 хода, без повторов 5 раундов). Выбор — действие `eventChoice`; без ответа к концу хода — вариант 0. Эффекты: `Player.effects` (`computeIncome`, `attackMultiplier`, `techCostFor`).
 - `diplomacy.ts` + engine: `relations`, `proposals`, действия `propose/acceptProposal/declineProposal/breakTreaty` (без ⚡, не только в свой ход). Перемирие/союз блокируют вход на земли, залп и путь (`map.ts shielded`); союз — общий обзор (`vision.ts isFriend`), проход набега через союзную клетку; разрыв — `breakAt` = раунд+1, вступает с хода разорвавшего; все живые в союзе → общая победа.
 - ИИ: `ai.ts` — стратегии (экспансия лёгкой конницей / фронт с депо / наступление / оборона, см. `docs/ai-strategy.md`, `aiStrategyOf`), `planAiTurn` (варианты по убыванию ценности, пороги в `TUNING`), `planAiDiplomacy`, `aiSquareReply`, `stepAi`. Игроки `ai:<n>`, лобби-действия `addAi/removeAi`.
+
+## Варгейм (`shared/src/wargame.ts`, режим `settings.mode === 'wargame'`)
+
+- Настройки: `mode`, `warCapital` (200–2000, по умолч. 500), `killGoal` (−1 авто = `autoKillGoal` ≈ капитал/150, 0 — только «уничтожить всех», N).
+- `startGame` → `startDeploy` (engine): без столиц, `prepareDeploy` (деньги = капитал, зоны проходимы), фаза `'deploy'`; ИИ сразу `autoDeploy` + готов.
+- Зоны: `zoneOwnerAt`/`deployZone` — по месту в списке игроков: сверху, снизу, слева, справа; глубина 2 (3 при карте ≥12).
+- Закупка: `applyDeployAction` (engine) → `deployStep` (wargame): `buySquad/sellSquad/buyCommander/sellCommander/buyFort/sellFort/auto/clear/ready`. Все готовы → `beginBattle`. Таймаут офлайна — `forceDeployReady`. Цены: `squadPrice` = (🪙+🔩) × `SQUAD_SIZE` (лёгкие 5, средние 4, тяжёлые 3), `commanderPrice`, `fortPrice`.
+- Отряд: `Tile.squad = {size, rest, active}` едет с армией (move/`displaceArmy`/залп); один отряд на клетку, ход — отряд целиком, бегство — только на пустую клетку.
+- Обёртка `applyAction` → `applyActionCore`: в варгейме до/после действия `squadCensus` → `settleWargame` (пустые клетки ничьи, стройка без отряда сорвана, `active` у задетых, `squadsKilled/squadsLost`, выбывание без отрядов, победа по `killGoal`/последний живой).
+- Лечение: `restSquads` в `nextTurn` для закончившего ход: `HEAL_REST_TURNS` = 2 хода покоя → +1 юнит до `size`.
+- Укрепления: купленные лежат в `Player.forts`; `build` в варгейме → `placeWarFort` (только под своим отрядом, частокол 1 ход, крепость 2).
+- Нет дохода, содержания, событий, дипломатии, найма, техов, командиров в бою. `scoreOf` = `wargameScore` (убитые отряды × 1000 + стоимость армии).
+- Туман: в `deploy` `maskStateFor` прячет чужие отряды, золото, укрепления целиком.
+- ИИ: `planWargameTurn` (ai.ts) — удары/залпы/каре из общих кандидатов + `warFortCands`, `warAdvanceCands` (поле `warField` в обход своих отрядов, потрёпанные стоят и лечатся).
+- Тесты: `scripts/wargame-checks.ts` (`runWargameChecks` из smoke.ts).

@@ -10,6 +10,9 @@ import {
   CAPITAL_INCOME,
   ECONOMY_TECH_BONUS,
   TURN_MINUTES_OPTIONS,
+  KILL_GOAL_MAX,
+  WAR_CAPITAL_MAX,
+  WAR_CAPITAL_MIN,
   emptyStats,
   techCost,
 } from './config.js';
@@ -29,14 +32,31 @@ import {
 } from './map.js';
 import { mulberry32 } from './rng.js';
 import { canSeeArmyOn, canWatchTile } from './vision.js';
+import {
+  HEAL_REST_TURNS,
+  WAR_FORTS,
+  WAR_FORT_TURNS,
+  allDeployed,
+  autoDeploy,
+  deployStep,
+  isWargame,
+  killGoalOf,
+  prepareDeploy,
+  squadSize,
+  squadUnit,
+  squadsOf,
+  wargameScore,
+} from './wargame.js';
 import { COMMANDERS } from './commanders.js';
 import { ERAS, buildingsFor, commandersFor, eraOf, isEraId, techsFor } from './eras.js';
 import type {
   ActionResult,
   AiLevel,
   Army,
+  BuildingType,
   CommanderId,
   Coord,
+  DeployAction,
   GameAction,
   GameFx,
   GameSettings,
@@ -46,6 +66,7 @@ import type {
   Player,
   PlayerStats,
   Resources,
+  Squad,
   TerrainType,
   Tile,
   UnitId,
@@ -123,6 +144,7 @@ function clearMarch(tile: Tile): void {
   tile.commander = null;
   tile.routedTurns = 0;
   tile.square = false;
+  tile.squad = null;
 }
 
 /** Повтор хода после ответа на каре — больше не предлагаем строй. */
@@ -182,6 +204,8 @@ export function isHotseatRival(playerId: string): boolean {
 /** В партии «сам с собой» хост действует и смотрит за того, чей сейчас ход. */
 export function actingPlayerId(state: GameState, userId: string): string {
   if (!state.settings.hotseat || userId !== state.hostId) return userId;
+  // Расстановка соло: сначала своя армия, после «Готов» — армия «Соперника».
+  if (state.phase === 'deploy') return state.players.find((p) => !p.deployReady)?.id ?? userId;
   if (state.phase !== 'playing' && state.phase !== 'finished') return userId;
   return currentPlayer(state)?.id ?? userId;
 }
@@ -265,6 +289,7 @@ export function normalizeState(state: GameState): GameState {
     player.effects ??= [];
     player.recentEvents ??= [];
     player.eventCooldown ??= 0;
+    player.forts ??= [];
   }
   for (const tile of state.tiles) {
     tile.routedTurns ??= 0;
@@ -423,6 +448,15 @@ function sanitizeSettings(patch: Partial<GameSettings>): Partial<GameSettings> {
     const actions = clampInt(patch.actionsPerTurn, 3, 8);
     if (actions != null) next.actionsPerTurn = actions;
   }
+  if (patch.mode === 'empire' || patch.mode === 'wargame') next.mode = patch.mode;
+  if (patch.warCapital != null) {
+    const capital = clampInt(patch.warCapital, WAR_CAPITAL_MIN, WAR_CAPITAL_MAX);
+    if (capital != null) next.warCapital = capital;
+  }
+  if (patch.killGoal != null) {
+    const goal = clampInt(patch.killGoal, -1, KILL_GOAL_MAX);
+    if (goal != null) next.killGoal = goal;
+  }
   return next;
 }
 
@@ -506,6 +540,7 @@ export function startGame(state: GameState, byPlayerId: string): ActionResult {
   }
   state.width = size;
   state.height = size;
+  if (isWargame(state)) return startDeploy(state);
   ensureCapitalApproaches(state.tiles, size, state.players.length, settings.terrainMode !== 'custom');
 
   const spots = capitalSpots(size, state.players.length);
@@ -541,9 +576,72 @@ export function startGame(state: GameState, byPlayerId: string): ActionResult {
   return { ok: true, events: [] };
 }
 
+/** Варгейм: вместо столиц — закупка и расстановка; ИИ закупаются сразу. */
+function startDeploy(state: GameState): ActionResult {
+  const settings = state.settings;
+  // В варгейме нет экономики и событий; дипломатия — тоже в бою на счёт отрядов лишняя.
+  settings.randomEvents = false;
+  settings.diplomacy = false;
+  prepareDeploy(state);
+  const rand = mulberry32(state.seed ^ 0x9e3779b9);
+  state.order = state.players
+    .map((p) => ({ id: p.id, k: rand() }))
+    .sort((a, b) => a.k - b.k)
+    .map((p) => p.id);
+  state.phase = 'deploy';
+  state.round = 0;
+  state.turnIndex = 0;
+  state.maxRounds = settings.maxRounds;
+  state.log = [{ round: 0, text: 'Варгейм: купите армию на капитал и расставьте её в своей зоне.' }];
+  for (const player of state.players) {
+    if (!player.ai) continue;
+    autoDeploy(state, player.id);
+    player.deployReady = squadsOf(state, player.id).length > 0;
+  }
+  if (allDeployed(state)) beginBattle(state);
+  return { ok: true, events: [] };
+}
+
+/** Закупка/расстановка варгейма; когда готовы все — начинается бой. */
+export function applyDeployAction(state: GameState, playerId: string, action: DeployAction): ActionResult {
+  const result = deployStep(state, playerId, action);
+  if (result.ok && allDeployed(state)) beginBattle(state);
+  return result;
+}
+
+/** Расстановка вышла по времени: докупить и поставить «Готов» за игрока. */
+export function forceDeployReady(state: GameState, playerId: string): void {
+  const player = playerById(state, playerId);
+  if (state.phase !== 'deploy' || !player || player.deployReady) return;
+  if (squadsOf(state, playerId).length === 0) autoDeploy(state, playerId);
+  player.deployReady = true;
+  if (allDeployed(state)) beginBattle(state);
+}
+
+function beginBattle(state: GameState): void {
+  state.phase = 'playing';
+  state.round = 1;
+  state.turnIndex = 0;
+  for (const player of state.players) {
+    player.deployReady = false;
+    if (squadsOf(state, player.id).length === 0) {
+      player.alive = false;
+      player.deadRound = 1;
+    }
+  }
+  state.log.push({ round: 1, text: 'Армии расставлены. В бой!' });
+  const alive = state.players.filter((p) => p.alive);
+  if (alive.length <= 1) {
+    finish(state, alive[0]?.id ?? null);
+    return;
+  }
+  while (!currentPlayer(state)?.alive && state.turnIndex < state.order.length - 1) state.turnIndex += 1;
+  beginTurn(state);
+}
+
 export function computeIncome(state: GameState, playerId: string): Resources {
   const player = playerById(state, playerId);
-  if (!player) return { ...EMPTY };
+  if (!player || isWargame(state)) return { ...EMPTY };
   const income: Resources = { ...EMPTY };
   for (const tile of state.tiles) {
     if (tile.ownerId !== playerId) continue;
@@ -599,6 +697,7 @@ export function totalArmy(state: GameState, playerId: string): number {
 }
 
 export function upkeepFor(state: GameState, playerId: string): number {
+  if (isWargame(state)) return 0;
   const units = unitsOf(state);
   let food = 0;
   for (const tile of state.tiles) {
@@ -721,8 +820,11 @@ function beginTurn(state: GameState): void {
   // Разрыв договора, объявленный этим игроком в прошлых раундах, вступает в силу.
   if (state.settings.diplomacy) enforceBreaks(state, player.id);
 
+  const war = isWargame(state);
   for (const tile of state.tiles) {
     if (tile.ownerId !== player.id || !tile.construction) continue;
+    // Варгейм: укрепление строит отряд на клетке — без него стройка стоит (и срывается уборкой).
+    if (war && armyCount(tile.army) === 0) continue;
     tile.construction.turnsLeft -= 1;
     if (tile.construction.turnsLeft > 0) continue;
     tile.building = tile.construction.building;
@@ -739,7 +841,7 @@ function beginTurn(state: GameState): void {
   tickEffects(player);
 
   const upkeep = upkeepFor(state, player.id);
-  if (player.resources.food >= upkeep) {
+  if (war || player.resources.food >= upkeep) {
     player.resources.food -= upkeep;
   } else {
     player.resources.food = 0;
@@ -797,7 +899,31 @@ function beginTurn(state: GameState): void {
     log(state, `${player.name}: каре рассыпалось.`, { actors: [player.id] });
   }
 
-  if (state.settings.randomEvents) rollEvent(state, player);
+  if (state.settings.randomEvents && !war) rollEvent(state, player);
+}
+
+/**
+ * Варгейм, конец хода владельца: отряд, который весь ход не ходил, не стрелял и не дрался,
+ * копит покой; за `HEAL_REST_TURNS` таких ходов подряд возвращает 1 юнит (до размера покупки).
+ */
+function restSquads(state: GameState, player: Player): void {
+  let healed = 0;
+  for (const tile of state.tiles) {
+    if (tile.ownerId !== player.id || armyCount(tile.army) === 0) continue;
+    const squad: Squad = (tile.squad ??= { size: armyCount(tile.army), rest: 0 });
+    if (squad.active) {
+      squad.active = false;
+      squad.rest = 0;
+      continue;
+    }
+    squad.rest += 1;
+    const unit = squadUnit(tile);
+    if (squad.rest < HEAL_REST_TURNS || !unit || armyCount(tile.army) >= squad.size) continue;
+    squad.rest = 0;
+    writeWings(tile, [...ensureWings(tile), { army: { [unit]: 1 }, movesLeft: 0, shotsLeft: 0 }]);
+    healed += 1;
+  }
+  if (healed > 0) log(state, `${player.name}: отряды отдохнули и пополнились (+${healed}).`, { actors: [player.id] });
 }
 
 function nextTurn(state: GameState): void {
@@ -807,6 +933,7 @@ function nextTurn(state: GameState): void {
     for (const tile of state.tiles) {
       if (tile.ownerId === ending.id && tile.routedTurns > 0) tile.routedTurns -= 1;
     }
+    if (isWargame(state)) restSquads(state, ending);
     // Не ответил на выбор — вариант «отказаться».
     if (ending.event?.pending) resolveEventChoice(state, ending, 0);
     // Предложения ему живут до конца его ближайшего хода.
@@ -841,6 +968,7 @@ function nextTurn(state: GameState): void {
 export function scoreOf(state: GameState, playerId: string): number {
   const player = playerById(state, playerId);
   if (!player) return 0;
+  if (isWargame(state)) return wargameScore(state, player);
   let score = 0;
   for (const tile of state.tiles) {
     if (tile.ownerId !== playerId) continue;
@@ -909,6 +1037,74 @@ function eliminate(state: GameState, victimId: string, conquerorId: string): voi
   }
   state.proposals = state.proposals.filter((p) => p.from !== victimId && p.to !== victimId);
   log(state, `Держава ${victim.name} пала под натиском ${conqueror?.name ?? 'врага'}.`, { public: true });
+}
+
+/** Добровольная сдача: земли — сильнейшему живому сопернику; можно не в свой ход. */
+function applySurrender(state: GameState, playerId: string): ActionResult {
+  const me = playerById(state, playerId);
+  if (!me || !me.alive) return { ok: false, error: 'Вы вне игры' };
+
+  if (state.pendingSquare && (state.pendingSquare.attackerId === playerId || state.pendingSquare.defenderId === playerId)) {
+    state.pendingSquare = null;
+  }
+  if (me.event?.pending) me.event = { ...me.event, pending: false };
+
+  const wasCurrent = currentPlayer(state)?.id === playerId;
+  const heir = state.players
+    .filter((p) => p.alive && p.id !== playerId)
+    .sort((a, b) => scoreOf(state, b.id) - scoreOf(state, a.id))[0];
+
+  me.alive = false;
+  me.deadRound = state.round;
+  let taken = 0;
+  for (const tile of state.tiles) {
+    if (tile.ownerId !== playerId) continue;
+    tile.ownerId = heir?.id ?? null;
+    tile.construction = null;
+    clearMarch(tile);
+    if (tile.capitalOf === playerId) tile.capitalOf = null;
+    taken += 1;
+  }
+  if (heir && taken > 1) countCaptured(state, heir.id, taken - 1);
+  for (const key of Object.keys(state.relations)) {
+    if (key.split('|').includes(playerId)) delete state.relations[key];
+  }
+  state.proposals = state.proposals.filter((p) => p.from !== playerId && p.to !== playerId);
+  log(
+    state,
+    heir ? `${me.name} сдаётся. Земли отходят ${heir.name}.` : `${me.name} сдаётся.`,
+    { public: true },
+  );
+
+  const alive = state.players.filter((p) => p.alive);
+  if (alive.length <= 1) {
+    finish(state, alive[0]?.id ?? null);
+    return { ok: true, events: [] };
+  }
+  if (checkAlliedVictory(state)) return { ok: true, events: [] };
+  if (wasCurrent) nextTurn(state);
+  return { ok: true, events: [] };
+}
+
+/** Варгейм: купленное укрепление ставит отряд на своей клетке; уйдёт — стройка сорвётся. */
+function placeWarFort(state: GameState, player: Player, tile: Tile, building: BuildingType): ActionResult {
+  if (tile.ownerId !== player.id || armyCount(tile.army) < 1) {
+    return { ok: false, error: 'Укрепление ставит отряд — выберите клетку со своим отрядом' };
+  }
+  if (tile.routedTurns > 0) return { ok: false, error: 'Отступающим отрядом нельзя управлять' };
+  if (tile.building) return { ok: false, error: 'Здесь уже есть постройка' };
+  if (tile.construction) return { ok: false, error: 'Здесь уже идёт стройка' };
+  if (!WAR_FORTS.includes(building)) return { ok: false, error: 'Такое укрепление не продаётся' };
+  const forts = (player.forts ??= []);
+  const idx = forts.indexOf(building);
+  if (idx < 0) return { ok: false, error: 'Это укрепление не куплено' };
+  forts.splice(idx, 1);
+  const turns = WAR_FORT_TURNS[building] ?? 1;
+  tile.construction = { building, turnsLeft: turns };
+  player.actionsLeft -= 1;
+  const name = buildingsOf(state)[building].name;
+  log(state, `${player.name} ставит ${name} — ${turns === 1 ? '1 ход' : `${turns} хода`}.`, { actors: [player.id], at: [tile] });
+  return { ok: true, events: [] };
 }
 
 function nextRandom(state: GameState): number {
@@ -1679,7 +1875,9 @@ function pickFleeDestination(
       if (n.ownerId != null && n.ownerId !== ownerId && armyCount(n.army) === 0) continue;
       seen.add(key);
       const steps = cur.d + 1;
-      if (canLandFlee(n, ownerId, origin, threat)) {
+      // Варгейм: бегущий отряд не вливается в чужой отряд — только на пустую клетку.
+      const stackFree = !isWargame(state) || armyCount(n.army) === 0;
+      if (stackFree && canLandFlee(n, ownerId, origin, threat)) {
         const dist = hexDistance(n, threat);
         if (dist >= originDist) {
           const score =
@@ -1715,6 +1913,7 @@ function displaceArmy(
   threat: Coord,
   commander: CommanderId | null,
   routedTurns: number,
+  squad: Squad | null = null,
 ): FleeResult {
   const empty: FleeResult = { ok: false, lostExtra: 0, steps: 0, left: 0 };
   if (armyCount(army) === 0) return empty;
@@ -1735,6 +1934,7 @@ function displaceArmy(
   dest.tile.ownerId = ownerId;
   writeWings(dest.tile, [...ensureWings(dest.tile), { army: fleeing, movesLeft: 0, shotsLeft: 0 }]);
   if (commander && !dest.tile.commander) dest.tile.commander = commander;
+  if (squad && !dest.tile.squad) dest.tile.squad = squad;
   dest.tile.routedTurns = Math.max(dest.tile.routedTurns, routedTurns);
   return { ok: true, lostExtra, steps: dest.steps, left: armyCount(fleeing) };
 }
@@ -1815,10 +2015,159 @@ function applySquareReply(state: GameState, userId: string, form: boolean): Acti
   return result;
 }
 
+/** Вложенность applyAction: ответ на каре повторяет ход изнутри — итоги варгейма считаем один раз. */
+let actionDepth = 0;
+
 export function applyAction(state: GameState, playerId: string, action: GameAction): ActionResult {
+  if (!isWargame(state) || state.phase !== 'playing') return applyActionCore(state, playerId, action);
+  const outer = actionDepth === 0;
+  if (outer) ensureSquads(state);
+  const census = outer ? squadCensus(state) : null;
+  const sides = outer ? battleSides(state, playerId, action) : null;
+  actionDepth += 1;
+  let result: ActionResult;
+  try {
+    result = applyActionCore(state, playerId, action);
+  } finally {
+    actionDepth -= 1;
+  }
+  if (outer && census && result.ok) settleWargame(state, census, sides, action);
+  return result;
+}
+
+/** У каждой армии варгейма есть запись отряда (страховка для старых и странных состояний). */
+function ensureSquads(state: GameState): void {
+  for (const tile of state.tiles) {
+    if (armyCount(tile.army) > 0 && !tile.squad) tile.squad = { size: armyCount(tile.army), rest: 0 };
+  }
+}
+
+interface SquadCensus {
+  where: Map<Squad, { key: string; count: number }>;
+  perPlayer: Map<string, number>;
+}
+
+function squadCensus(state: GameState): SquadCensus {
+  const where = new Map<Squad, { key: string; count: number }>();
+  const perPlayer = new Map<string, number>();
+  for (const tile of state.tiles) {
+    if (!tile.ownerId || armyCount(tile.army) === 0) continue;
+    if (tile.squad) where.set(tile.squad, { key: coordKey(tile), count: armyCount(tile.army) });
+    perPlayer.set(tile.ownerId, (perPlayer.get(tile.ownerId) ?? 0) + 1);
+  }
+  return { where, perPlayer };
+}
+
+/** Кто с кем дерётся в этом действии — кому зачесть уничтоженные отряды. */
+function battleSides(state: GameState, playerId: string, action: GameAction): { actor: string; target: string | null } | null {
+  if (action.type === 'move' || action.type === 'shoot') {
+    return { actor: playerId, target: tileAt(state, action.to.x, action.to.y)?.ownerId ?? null };
+  }
+  if (action.type === 'squareReply' && state.pendingSquare) {
+    return { actor: state.pendingSquare.attackerId, target: state.pendingSquare.defenderId };
+  }
+  return null;
+}
+
+/** Клетки, которых коснулось действие: их отряды в этот ход не отдыхают. */
+function touchedCoords(action: GameAction): Coord[] {
+  switch (action.type) {
+    case 'move':
+      return [action.from, action.to, ...(action.supportFrom ?? [])];
+    case 'shoot':
+      return [action.from, action.to];
+    case 'build':
+    case 'formSquare':
+    case 'breakSquare':
+      return [action.at];
+    default:
+      return [];
+  }
+}
+
+/**
+ * Варгейм после действия: пустые клетки ничьи, стройка без отряда сорвана, отряды, что
+ * двигались или дрались, теряют покой; погибшие отряды засчитываются, армии без отрядов
+ * выбывают; проверка победы по счёту и по уничтожению.
+ */
+function settleWargame(
+  state: GameState,
+  census: SquadCensus,
+  sides: { actor: string; target: string | null } | null,
+  action: GameAction,
+): void {
+  for (const tile of state.tiles) {
+    if (armyCount(tile.army) > 0) {
+      tile.squad ??= { size: armyCount(tile.army), rest: 0 };
+      const prev = census.where.get(tile.squad);
+      // Сдвинулся или потерял юниты — значит, был в деле (пополнение после отдыха не в счёт).
+      if (!prev || prev.key !== coordKey(tile) || armyCount(tile.army) < prev.count) tile.squad.active = true;
+      continue;
+    }
+    if (tile.construction && tile.ownerId) {
+      log(state, `Стройка (${buildingsOf(state)[tile.construction.building].name}) сорвана: отряд ушёл.`, {
+        actors: [tile.ownerId],
+        at: [tile],
+      });
+    }
+    tile.construction = null;
+    tile.ownerId = null;
+    clearMarch(tile);
+  }
+  for (const c of touchedCoords(action)) {
+    const tile = tileAt(state, c.x, c.y);
+    if (tile?.squad && armyCount(tile.army) > 0) tile.squad.active = true;
+  }
+
+  const goal = killGoalOf(state.settings);
+  for (const player of state.players) {
+    const had = census.perPlayer.get(player.id) ?? 0;
+    const now = squadsOf(state, player.id).length;
+    const lost = had - now;
+    if (lost <= 0) continue;
+    player.stats.squadsLost += lost;
+    const killerId = sides ? (player.id === sides.actor ? sides.target : sides.actor) : null;
+    const killer = killerId ? playerById(state, killerId) : undefined;
+    if (killer) {
+      killer.stats.squadsKilled += lost;
+      const tally = goal > 0 ? ` (${killer.stats.squadsKilled}/${goal})` : '';
+      log(state, `${killer.name} уничтожает ${lost === 1 ? 'отряд' : `${lost} отр.`} ${player.name}${tally}.`, {
+        public: true,
+      });
+    }
+    if (player.alive && now === 0) {
+      player.alive = false;
+      player.deadRound = state.round;
+      log(state, `Армия ${player.name} разбита.`, { public: true });
+    }
+  }
+
+  if (state.phase !== 'playing') return;
+  if (goal > 0) {
+    const champion = state.players
+      .filter((p) => p.alive && p.stats.squadsKilled >= goal)
+      .sort((a, b) => b.stats.squadsKilled - a.stats.squadsKilled)[0];
+    if (champion) {
+      log(state, `${champion.name} уничтожил ${champion.stats.squadsKilled} отр. — цель достигнута.`, { public: true });
+      finish(state, champion.id);
+      return;
+    }
+  }
+  const alive = state.players.filter((p) => p.alive);
+  if (alive.length <= 1) {
+    finish(state, alive[0]?.id ?? null);
+    return;
+  }
+  if (!currentPlayer(state)?.alive) nextTurn(state);
+}
+
+function applyActionCore(state: GameState, playerId: string, action: GameAction): ActionResult {
   if (state.phase !== 'playing') return { ok: false, error: 'Игра не идёт' };
   if (action.type === 'squareReply') {
     return applySquareReply(state, playerId, action.form);
+  }
+  if (action.type === 'surrender') {
+    return applySurrender(state, playerId);
   }
   // Договоры заключают и разрывают в любой момент, не тратя действий.
   if (isDiplomacyAction(action)) return applyDiplomacy(state, playerId, action);
@@ -1834,6 +2183,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
     }
 
     case 'research': {
+      if (isWargame(state)) return { ok: false, error: 'В варгейме нет технологий' };
       if (player.actionsLeft < 1) return { ok: false, error: 'Действия на ход закончились' };
       const techs = techsFor(era(state));
       if (!Object.hasOwn(techs, action.tech)) return { ok: false, error: 'Неизвестная технология' };
@@ -1855,6 +2205,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       if (player.actionsLeft < 1) return { ok: false, error: 'Действия на ход закончились' };
       const tile = tileAt(state, action.at.x, action.at.y);
       if (!tile) return { ok: false, error: 'Клетки не существует' };
+      if (isWargame(state)) return placeWarFort(state, player, tile, action.building);
       if (tile.ownerId !== playerId) return { ok: false, error: 'Клетка не ваша' };
       if (tile.building) return { ok: false, error: 'Здесь уже есть постройка' };
       if (tile.construction) return { ok: false, error: 'Здесь уже идёт стройка' };
@@ -1874,6 +2225,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
     }
 
     case 'recruit': {
+      if (isWargame(state)) return { ok: false, error: 'В варгейме армию покупают до боя' };
       if (player.actionsLeft < 1) return { ok: false, error: 'Действия на ход закончились' };
       const tile = tileAt(state, action.at.x, action.at.y);
       if (!tile) return { ok: false, error: 'Клетки не существует' };
@@ -1900,6 +2252,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
     }
 
     case 'appoint': {
+      if (isWargame(state)) return { ok: false, error: 'В варгейме командиров покупают до боя' };
       if (player.actionsLeft < 1) return { ok: false, error: 'Действия на ход закончились' };
       const tile = tileAt(state, action.at.x, action.at.y);
       if (!tile) return { ok: false, error: 'Клетки не существует' };
@@ -1939,8 +2292,13 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       if (from.movesLeft < 1) return { ok: false, error: 'Эти войска уже исчерпали запас хода' };
       const dist = hexDistance(from, to);
       const enemyFight = to.ownerId !== playerId && armyCount(to.army) > 0;
-      const count = Math.floor(action.count);
-      const only = action.unit && Object.hasOwn(UNITS, action.unit) ? action.unit : undefined;
+      // Варгейм: отряд ходит целиком и не встаёт на клетку к своему.
+      const war = isWargame(state);
+      if (war && !enemyFight && armyCount(to.army) > 0) {
+        return { ok: false, error: 'Два отряда на одну клетку не встают' };
+      }
+      const count = war ? armyCount(from.army) : Math.floor(action.count);
+      const only = !war && action.unit && Object.hasOwn(UNITS, action.unit) ? action.unit : undefined;
       const fromWings = ensureWings(from);
       const wantCharge =
         dist === 2 &&
@@ -1997,7 +2355,9 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       );
       const movingCommander = armyCount(wingsToArmy(restWings)) === 0 ? from.commander : null;
       const movingRouted = armyCount(wingsToArmy(restWings)) === 0 ? from.routedTurns : 0;
+      const movingSquad = armyCount(wingsToArmy(restWings)) === 0 ? from.squad ?? null : null;
       if (movingCommander) from.commander = null;
+      if (movingSquad) from.squad = null;
 
       const fxBase = {
         kind: charging ? ('charge' as const) : ('move' as const),
@@ -2016,7 +2376,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       };
 
       const claimPath = () => {
-        if (!path) return;
+        if (!path || war) return;
         for (const c of path.slice(1, -1)) {
           const step = tileAt(state, c.x, c.y);
           if (!step || step.ownerId === playerId) continue;
@@ -2045,9 +2405,11 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
           to.construction = null;
           to.routedTurns = 0;
           to.square = false;
+          to.squad = null;
         }
         writeWings(to, [...keep, ...incoming]);
         if (movingCommander && !to.commander) to.commander = movingCommander;
+        if (movingSquad && armyCount(to.army) > 0) to.squad = movingSquad;
         if (movingRouted > 0) to.routedTurns = Math.max(to.routedTurns, movingRouted);
         if (armyCount(to.army) === 0) {
           to.commander = null;
@@ -2101,7 +2463,9 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
           const capitalVictim = to.capitalOf;
           const defId = to.ownerId;
           const defCmdr = to.commander;
+          const defSquad = to.squad ?? null;
           to.commander = null;
+          to.squad = null;
           if (armyCount(outcome.defenderSurvivors) > 0 && defId) {
             const fled = displaceArmy(
               state,
@@ -2111,6 +2475,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
               { x: from.x, y: from.y },
               defCmdr,
               outcome.defenderRoutTurns,
+              defSquad,
             );
             if (fled.ok) {
               log(
@@ -2154,13 +2519,16 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
             { x: to.x, y: to.y },
             movingCommander,
             outcome.attackerRoutTurns,
+            movingSquad,
           );
           if (!fled.ok && fled.left > 0) {
             writeWings(from, [
               ...ensureWings(from),
               { army: scaleArmy(moverSurvivors, fled.left), movesLeft: 0, shotsLeft: 0 },
             ]);
+            from.ownerId = playerId;
             if (movingCommander && !from.commander) from.commander = movingCommander;
+            if (movingSquad && !from.squad) from.squad = movingSquad;
             from.routedTurns = Math.max(from.routedTurns, outcome.attackerRoutTurns);
           }
           log(
@@ -2179,6 +2547,10 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
           ]);
           if (movingCommander && armyCount(moverSurvivors) > 0 && !from.commander) {
             from.commander = movingCommander;
+          }
+          if (movingSquad && armyCount(moverSurvivors) > 0 && !from.squad) {
+            from.ownerId = playerId;
+            from.squad = movingSquad;
           }
           log(
             state,
@@ -2308,6 +2680,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       if (routed) {
         const defId = to.ownerId!;
         const defCmdr = to.commander;
+        const defSquad = to.squad ?? null;
         const survivors = { ...to.army };
         const survivorsCount = armyCount(survivors);
         const routTurns = routTurnsFromLoss(defCount, survivorsCount);
@@ -2315,13 +2688,15 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
         const shotsLeft = to.shotsLeft;
         writeWings(to, []);
         to.commander = null;
+        to.squad = null;
         to.routedTurns = 0;
-        const fled = displaceArmy(state, survivors, to, defId, { x: from.x, y: from.y }, defCmdr, routTurns);
+        const fled = displaceArmy(state, survivors, to, defId, { x: from.x, y: from.y }, defCmdr, routTurns, defSquad);
         if (!fled.ok && fled.left > 0) {
           writeWings(to, [
             { army: scaleArmy(survivors, fled.left), movesLeft: 0, shotsLeft: 0 },
           ]);
           if (defCmdr) to.commander = defCmdr;
+          if (defSquad) to.squad = defSquad;
           to.routedTurns = Math.max(to.routedTurns, routTurns);
         }
         log(

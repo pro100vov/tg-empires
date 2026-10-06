@@ -8,8 +8,8 @@ import express from 'express';
 import { Server } from 'socket.io';
 import type { Socket } from 'socket.io';
 
-import { addAiPlayer, addPlayer, applyAction, applyLobbyAction, autoEndTurnIfExhausted, actingPlayerId, currentPlayer, humanPlayers, isHotseatRival, logPublic, maskFxFor, markDisconnected, parseGameAction, parseLobbyAction, publicView, removePlayer, rememberSeenBuildings, setupHotseat, startGame } from '@tge/shared';
-import type { AiLevel, GameFx, GameState } from '@tge/shared';
+import { addAiPlayer, addPlayer, applyAction, applyDeployAction, applyLobbyAction, forceDeployReady, parseDeployAction, autoEndTurnIfExhausted, actingPlayerId, currentPlayer, humanPlayers, isHotseatRival, logPublic, maskFxFor, markDisconnected, parseGameAction, parseLobbyAction, publicView, removePlayer, rememberSeenBuildings, setupHotseat, startGame } from '@tge/shared';
+import type { AiLevel, GameFx, GameMode, GameState } from '@tge/shared';
 
 import { devUser, verifyInitData } from './auth.js';
 import type { AuthUser } from './auth.js';
@@ -127,6 +127,11 @@ function parseAiLevels(raw: unknown): AiLevel[] | null {
   return out;
 }
 
+/** Режим новой комнаты из запроса: варгейм или империя по умолчанию. */
+function parseMode(raw: unknown): GameMode {
+  return raw === 'wargame' ? 'wargame' : 'empire';
+}
+
 /** Ключ учёта офлайн-времени игрока в комнате: своя запись на каждую пару комната/игрок. */
 function offlineKey(roomCode: string, userId: string): string {
   return `${roomCode}\n${userId}`;
@@ -188,18 +193,19 @@ io.on('connection', (socket) => {
 
   socket.on(
     'room:create',
-    safe<unknown>('room:create', async (_payload, reply) => {
-      await joinState(createRoom(user.id), reply);
+    safe<{ mode?: unknown }>('room:create', async (payload, reply) => {
+      await joinState(createRoom(user.id, parseMode(payload?.mode)), reply);
     }),
   );
 
   socket.on(
     'room:solo',
-    safe<{ ai?: unknown; tutorial?: unknown }>('room:solo', async (payload, reply) => {
+    safe<{ ai?: unknown; tutorial?: unknown; mode?: unknown }>('room:solo', async (payload, reply) => {
       // «Против ИИ»: обычная комната, где вместе с игроком сидят 1–3 ИИ; хост сам настраивает и стартует.
       const levels = parseAiLevels(payload?.ai);
+      const mode = payload?.tutorial === true ? 'empire' : parseMode(payload?.mode);
       if (levels) {
-        const state = createRoom(user.id);
+        const state = createRoom(user.id, mode);
         addPlayer(state, user.id, user.name);
         for (const level of levels) addAiPlayer(state, level);
         if (payload?.tutorial === true) {
@@ -214,7 +220,7 @@ io.on('connection', (socket) => {
         pushStateSafe(state);
         return;
       }
-      const state = createRoom(user.id);
+      const state = createRoom(user.id, mode);
       const result = setupHotseat(state, user.id, user.name);
       if (!result.ok) return reply({ ok: false, error: result.error });
       markDirty(state.roomCode);
@@ -311,6 +317,20 @@ io.on('connection', (socket) => {
   );
 
   socket.on(
+    'deploy:action',
+    safe<{ action?: unknown }>('deploy:action', (payload, reply) => {
+      const state = data.roomCode ? getRoom(data.roomCode) : undefined;
+      if (!state) return reply({ ok: false, error: 'Комната не найдена' });
+      const action = parseDeployAction(payload?.action);
+      if (!action) return reply({ ok: false, error: 'Некорректное действие' });
+      const result = applyDeployAction(state, actingPlayerId(state, user.id), action);
+      if (!result.ok) return reply({ ok: false, error: result.error });
+      reply({ ok: true, state: viewOf(state, user.id) });
+      pushStateSafe(state, { skip: socket.id });
+    }),
+  );
+
+  socket.on(
     'game:action',
     safe<{ action?: unknown }>('game:action', (payload, reply) => {
       const state = data.roomCode ? getRoom(data.roomCode) : undefined;
@@ -402,6 +422,20 @@ function sweep(): void {
         if (since != null && now - since > LOBBY_GRACE_MS) {
           removePlayer(state, player.id);
           offlineSince.delete(key);
+          pushStateSafe(state);
+        }
+      }
+      continue;
+    }
+
+    if (state.phase === 'deploy') {
+      // Варгейм: не вернувшийся к расстановке получает автозакупку и «Готов» — остальные не ждут вечно.
+      if (state.settings.hotseat) continue;
+      for (const player of humanPlayers(state)) {
+        if (player.connected || player.deployReady) continue;
+        const since = offlineSince.get(offlineKey(state.roomCode, player.id));
+        if (since != null && now - since > LOBBY_GRACE_MS) {
+          forceDeployReady(state, player.id);
           pushStateSafe(state);
         }
       }

@@ -55,6 +55,11 @@ import {
   canFormSquare,
   shouldOfferSquare,
   squarePinned,
+  isWargame,
+  killGoalOf,
+  WAR_FORTS,
+  WAR_FORT_TURNS,
+  HEAL_REST_TURNS,
 } from '@tge/shared';
 import type { Army, BuildingType, CommanderId, Coord, EraId, GameAction, GameFx, GameState, Tile, UnitClass, UnitId } from '@tge/shared';
 import MapBoard from './MapBoard';
@@ -298,6 +303,7 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
   const [showLog, setShowLog] = useState(false);
   const [showStats, setShowStats] = useState(false);
   const [showDip, setShowDip] = useState(false);
+  const [confirmSurrender, setConfirmSurrender] = useState(false);
   const [closedEvent, setClosedEvent] = useState('');
   const [dismissedProposals, setDismissedProposals] = useState<string[]>([]);
   const [showMini, setShowMini] = useState(() => initialMiniMap(state.settings.mapSize));
@@ -337,6 +343,7 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
     setShowLog(false);
     setShowStats(false);
     setShowDip(false);
+    setConfirmSurrender(false);
   }, [meId]);
 
   // Обратный отсчёт хода: сверяем часы с сервером (в состоянии лежит его время).
@@ -575,12 +582,16 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
     (selectedTile.capitalOf === meId ||
       (selectedTile.building ? BUILDINGS[selectedTile.building].allowsRecruit : false));
 
+  const war = isWargame(state);
+  const myForts = me?.forts ?? [];
   const canBuildHere =
     selectedTile != null &&
     selectedTile.ownerId === meId &&
     !selectedTile.building &&
     !selectedTile.construction &&
-    TERRAIN[selectedTile.terrain].passable;
+    TERRAIN[selectedTile.terrain].passable &&
+    // Варгейм: купленное укрепление ставит отряд на своей клетке.
+    (!war || (armyCount(selectedTile.army) > 0 && myForts.length > 0));
 
   const canAppointHere =
     canRecruitHere && selectedTile != null && armyCount(selectedTile.army) > 0 && !selectedTile.commander;
@@ -630,6 +641,17 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
             {hotseat ? `Ход: ${current?.name ?? '—'}` : isMyTurn ? 'Ваш ход' : `Ходит ${current?.name ?? '—'}`}
           </span>
         </div>
+        {war ? (
+        <div className="resources">
+          <span title="Уничтожено вражеских отрядов">
+            🎯 {me.stats.squadsKilled}
+            {killGoalOf(state.settings) > 0 ? `/${killGoalOf(state.settings)}` : ''}
+          </span>
+          <span title="Своих отрядов">⚔️ {state.tiles.filter((t) => t.ownerId === meId && armyCount(t.army) > 0).length}</span>
+          <span title="Укрепления в запасе">🪵 {myForts.length}</span>
+          <span title="Действия" className="actions-left">⚡ {isMyTurn ? me.actionsLeft : '—'}</span>
+        </div>
+        ) : (
         <div className="resources" data-tour="resources">
           <span title="Золото">🪙 {me.resources.gold}{income ? <i className="delta"> +{income.gold}</i> : null}</span>
           <span title="Еда">🌾 {me.resources.food}
@@ -638,6 +660,7 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
           <span title="Железо">🔩 {me.resources.iron}{income ? <i className="delta"> +{income.iron}</i> : null}</span>
           <span title="Действия" className="actions-left" data-tour="actions">⚡ {isMyTurn ? me.actionsLeft : '—'}</span>
         </div>
+        )}
         <EffectChips me={me} />
         {state.phase === 'playing' && (
           <div className="topbar-tools">
@@ -660,6 +683,11 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
             <button className="btn tiny" onClick={() => setShowStats(true)} title="Статистика">
               📈
             </button>
+            {me.alive && (
+              <button className="btn tiny" onClick={() => setConfirmSurrender(true)} title="Сдаться">
+                🏳️
+              </button>
+            )}
           </div>
         )}
       </header>
@@ -681,9 +709,11 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
           <button type="button" className={`map-btn${showMini ? ' on' : ''}`} onClick={toggleMini} title="Мини-карта" data-tour="mini">
             🗺
           </button>
-          <button type="button" className="map-btn" onClick={goCapital} title="К столице">
-            🏰
-          </button>
+          {!war && (
+            <button type="button" className="map-btn" onClick={goCapital} title="К столице">
+              🏰
+            </button>
+          )}
           {state.phase === 'playing' && (
             <button type="button" className="map-btn" onClick={goNextStack} title="К следующему отряду с ходом">
               ⚔️
@@ -736,15 +766,17 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
                 ))}
               </div>
             )}
-            <input
-              type="range"
-              min={1}
-              max={Math.max(1, fromCount)}
-              value={Math.min(moveCount, Math.max(1, fromCount))}
-              onChange={(e) => setMoveCount(Number(e.target.value))}
-            />
+            {!war && (
+              <input
+                type="range"
+                min={1}
+                max={Math.max(1, fromCount)}
+                value={Math.min(moveCount, Math.max(1, fromCount))}
+                onChange={(e) => setMoveCount(Number(e.target.value))}
+              />
+            )}
             <div className="row">
-              <span>{moveCount} из {fromCount} отр.</span>
+              <span>{war ? `Отряд целиком · ${fromCount}` : `${moveCount} из ${fromCount} отр.`}</span>
               {battleForecast != null && (
                 <span className={battleForecast >= 1.2 ? 'good' : battleForecast >= 0.9 ? 'warn' : 'bad'}>
                   {coveringCount > 0 ? `Вместе ${moveCount + coveringCount} отр. · ` : ''}
@@ -908,9 +940,11 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
         <button className="btn" onClick={() => setShowLog(true)} title="Журнал">
           📜
         </button>
-        <button className="btn" data-tour="tech" onClick={() => setShowTech(true)}>
-          🔬 Технологии
-        </button>
+        {!war && (
+          <button className="btn" data-tour="tech" onClick={() => setShowTech(true)}>
+            🔬 Технологии
+          </button>
+        )}
         <button className="btn primary grow" data-tour="end" disabled={!isMyTurn || Boolean(pendingSquare)} onClick={() => run({ type: 'endTurn' })}>
           Завершить ход
         </button>
@@ -947,7 +981,36 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
         />
       )}
 
-      {sheet === 'build' && selectedTile && (
+      {sheet === 'build' && selectedTile && war && (
+        <div className="overlay" onClick={() => setSheet(null)}>
+          <div className="overlay-card sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="panel-title">Поставить укрепление</div>
+            <p className="muted small">Ставит отряд на этой клетке. Уйдёт или погибнет до конца стройки — укрепление пропадёт.</p>
+            {WAR_FORTS.filter((b) => myForts.includes(b)).map((b) => {
+              const info = buildingsFor(era)[b];
+              return (
+                <button
+                  key={b}
+                  className="btn full"
+                  disabled={!isMyTurn || me.actionsLeft < 1}
+                  onClick={() => {
+                    void run({ type: 'build', at: { x: selectedTile.x, y: selectedTile.y }, building: b }).then((result) => {
+                      if (result.ok) setSheet(null);
+                    });
+                  }}
+                >
+                  {info.icon} {info.name} · {info.description} · {WAR_FORT_TURNS[b]} х. · 1⚡ (в запасе {myForts.filter((f) => f === b).length})
+                </button>
+              );
+            })}
+            <button className="btn full" onClick={() => setSheet(null)}>
+              Закрыть
+            </button>
+          </div>
+        </div>
+      )}
+
+      {sheet === 'build' && selectedTile && !war && (
         <BuildSheet
           era={era}
           gold={me.resources.gold}
@@ -1076,6 +1139,43 @@ export default function GameScreen({ state, meId, viewerId, act, notify, fx, onE
         </div>
       )}
 
+      {confirmSurrender && me.alive && state.phase === 'playing' && (
+        <div className="overlay center">
+          <div className="overlay-card">
+            <div className="hero-icon">🏳️</div>
+            <h2>Сдаться?</h2>
+            <p>Держава падёт, земли отойдут сопернику. После этого можно начать новую партию.</p>
+            <div className="row" style={{ marginTop: 12 }}>
+              <button
+                className="btn primary grow"
+                onClick={() => {
+                  setConfirmSurrender(false);
+                  void run({ type: 'surrender' });
+                }}
+              >
+                Сдаться
+              </button>
+              <button className="btn grow" onClick={() => setConfirmSurrender(false)}>
+                Отмена
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!me.alive && state.phase === 'playing' && (
+        <div className="overlay center">
+          <div className="overlay-card">
+            <div className="hero-icon">🏳️</div>
+            <h2>Держава пала</h2>
+            <p className="muted">Партия ещё идёт — можно выйти в меню и начать новую.</p>
+            <button className="btn primary full" onClick={onExit}>
+              В меню
+            </button>
+          </div>
+        </div>
+      )}
+
       {tutorial && state.phase === 'playing' && !hotseat && onTutorialDone && (
         <Tutorial settings={state.settings} onDone={onTutorialDone} />
       )}
@@ -1160,6 +1260,12 @@ function TileDetails({
           </span>
         )}
         <ArmyChips army={tile.army} era={era} />
+        {isWargame(state) && tile.squad && count > 0 && (
+          <span className="chip" title="Потрёпанный отряд пополняется на 1 за 2 своих хода покоя">
+            Отряд {count}/{tile.squad.size}
+            {isMine && count < tile.squad.size ? ` · отдых ${Math.min(tile.squad.rest, HEAL_REST_TURNS)}/${HEAL_REST_TURNS}` : ''}
+          </span>
+        )}
         {terrain.defenseBonus > 0 && (
           <span className="chip">Ближний +{Math.round(terrain.defenseBonus * 100)}%</span>
         )}
@@ -1280,8 +1386,8 @@ function TileDetails({
           {canBuildHere && (
             <button className="action-btn action-build" onClick={onOpenBuild}>
               <span className="action-icon">🏗️</span>
-              <span className="action-label">Стройка</span>
-              <span className="action-sub">несколько ходов</span>
+              <span className="action-label">{isWargame(state) ? 'Укрепление' : 'Стройка'}</span>
+              <span className="action-sub">{isWargame(state) ? 'из запаса' : 'несколько ходов'}</span>
             </button>
           )}
           {canAppointHere && (

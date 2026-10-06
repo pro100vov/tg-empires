@@ -19,6 +19,7 @@ const HELP = [
   'изучайте технологии и захватывайте земли соперников.',
   '',
   '/newgame — создать комнату и получить ссылку-приглашение',
+  '/wargame — варгейм: армия на стартовый капитал, без экономики — сразу в бой',
   '/join КОД — присоединиться к существующей комнате',
   '/games — мои партии: где сейчас ваш ход',
   '/notify on|off — сообщения «Ваш ход» и итоги партий',
@@ -29,6 +30,7 @@ const HELP = [
 function gameLine(g: ReturnType<typeof myGames>[number]): string {
   if (g.phase === 'lobby') return `🕓 <b>${g.roomCode}</b> — лобби, ${g.players.length} игр.`;
   if (g.phase === 'finished') return `🏁 <b>${g.roomCode}</b> — партия окончена`;
+  if (g.phase === 'deploy') return `🛡️ <b>${g.roomCode}</b> — варгейм, расстановка армий`;
   const round = `раунд ${g.round}/${g.maxRounds}`;
   return g.myTurn
     ? `⚔️ <b>${g.roomCode}</b> — ваш ход (${round})`
@@ -111,6 +113,22 @@ export async function startBot(config: BotConfig): Promise<Bot> {
         `Комната создана: <b>${state.roomCode}</b>`,
         '',
         'Откройте игру и дождитесь друзей — до 4 держав в партии.',
+        `Приглашение: ${inviteLink(state.roomCode)}`,
+      ].join('\n'),
+      { parse_mode: 'HTML', reply_markup: openKeyboard(ctx, state.roomCode) },
+    );
+  });
+
+  bot.command('wargame', async (ctx) => {
+    const hostId = String(ctx.from?.id ?? '');
+    if (!hostId) return;
+    const state = createRoom(hostId, 'wargame');
+    await ctx.reply(
+      [
+        `⚔️ Варгейм: <b>${state.roomCode}</b>`,
+        '',
+        'Без экономики: каждый покупает армию на стартовый капитал (его задаёт хост в лобби),',
+        'вслепую расставляет её у своего края карты — и в бой.',
         `Приглашение: ${inviteLink(state.roomCode)}`,
       ].join('\n'),
       { parse_mode: 'HTML', reply_markup: openKeyboard(ctx, state.roomCode) },
@@ -215,6 +233,7 @@ export async function startBot(config: BotConfig): Promise<Bot> {
     await bot.api.setMyCommands([
       { command: 'play', description: 'Открыть игру' },
       { command: 'newgame', description: 'Создать новую партию' },
+      { command: 'wargame', description: 'Варгейм: армия на капитал, сразу в бой' },
       { command: 'join', description: 'Присоединиться по коду' },
       { command: 'games', description: 'Мои партии' },
       { command: 'notify', description: 'Уведомления о ходе: on / off' },

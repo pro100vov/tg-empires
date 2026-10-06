@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 import { actingPlayerId } from '@tge/shared';
-import type { GameAction, GameFx, GameState, LobbyAction, MyGame } from '@tge/shared';
+import type { DeployAction, GameAction, GameFx, GameMode, GameState, LobbyAction, MyGame } from '@tge/shared';
 import { call, connect, request } from './net';
 import { hapticResult, loadFlag, requestWriteAccess, roomCodeFromEnvironment, saveFlag } from './telegram';
 import Lobby from './components/Lobby';
 import type { SoloOptions } from './components/Lobby';
 import GameScreen from './components/GameScreen';
+import DeployScreen from './components/DeployScreen';
 import Toast from './components/Toast';
 
 interface Me {
@@ -159,10 +160,10 @@ export default function App() {
     [applyState],
   );
 
-  const createRoom = useCallback(async () => {
+  const createRoom = useCallback(async (mode?: GameMode) => {
     const socket = socketRef.current;
     if (!socket) return;
-    const response = await request(socket, 'room:create', {});
+    const response = await request(socket, 'room:create', mode ? { mode } : {});
     if (response.ok) applyState(response.state);
     else setToast(response.error);
   }, [applyState]);
@@ -240,6 +241,22 @@ export default function App() {
       const response = await request(socket, 'lobby:action', { action });
       if (response.ok) applyState(response.state);
       else setToast(response.error);
+    },
+    [applyState],
+  );
+
+  const deployAct = useCallback(
+    async (action: DeployAction) => {
+      const socket = socketRef.current;
+      if (!socket) return false;
+      const response = await request(socket, 'deploy:action', { action });
+      if (response.ok) {
+        applyState(response.state);
+        return true;
+      }
+      setToast(response.error);
+      hapticResult('error');
+      return false;
     },
     [applyState],
   );
@@ -332,6 +349,8 @@ export default function App() {
           onLobby={lobbyAct}
           onExit={leaveRoom}
         />
+      ) : state.phase === 'deploy' ? (
+        <DeployScreen state={state} meId={actingPlayerId(state, me.id)} deploy={deployAct} onExit={leaveRoom} />
       ) : (
         <GameScreen
           state={state}
@@ -342,7 +361,7 @@ export default function App() {
           fx={fx}
           onExit={leaveRoom}
           onRematch={rematch}
-          tutorial={forceTutorial || tutorialDone === false}
+          tutorial={state.settings.mode !== 'wargame' && (forceTutorial || tutorialDone === false)}
           onTutorialDone={finishTutorial}
         />
       )}

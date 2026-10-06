@@ -1,5 +1,5 @@
 import { createGame, humanPlayers, normalizeState, randomRoomCode, randomSeed } from '@tge/shared';
-import type { GameState, MyGame, RoomSummary } from '@tge/shared';
+import type { GameMode, GameState, MyGame, RoomSummary } from '@tge/shared';
 import { dataFile, readJsonSafe, writeJsonAtomic } from './storage.js';
 
 /** Лобби, где сидят люди: живёт, пока они заходят. */
@@ -78,10 +78,11 @@ export function loadRooms(): GameState[] {
   return loaded;
 }
 
-export function createRoom(hostId: string): GameState {
+export function createRoom(hostId: string, mode: GameMode = 'empire'): GameState {
   let code = randomRoomCode();
   while (rooms.has(code)) code = randomRoomCode();
   const state = createGame(code, hostId, randomSeed());
+  state.settings.mode = mode;
   rooms.set(code, { state, updatedAt: Date.now() });
   markDirty(code);
   return state;
@@ -131,7 +132,7 @@ export function listRoomsOf(userId: string): GameState[] {
 
 /** Сводка по партиям игрока для бота и меню: сначала те, где его ход. */
 export function myGames(userId: string): MyGame[] {
-  const rank = (g: MyGame) => (g.myTurn ? 0 : g.phase === 'playing' ? 1 : g.phase === 'lobby' ? 2 : 3);
+  const rank = (g: MyGame) => (g.myTurn ? 0 : g.phase === 'playing' || g.phase === 'deploy' ? 1 : g.phase === 'lobby' ? 2 : 3);
   return listRoomsOf(userId)
     .map((state): MyGame => {
       const currentId = state.phase === 'playing' ? state.order[state.turnIndex] : undefined;
@@ -140,6 +141,7 @@ export function myGames(userId: string): MyGame[] {
       return {
         roomCode: state.roomCode,
         phase: state.phase,
+        mode: state.settings.mode,
         round: state.round,
         maxRounds: state.maxRounds,
         players: state.players.map((p) => ({ name: p.name, color: p.color })),
@@ -164,7 +166,7 @@ export function startRoomCleanup(): NodeJS.Timeout {
       let ttl: number;
       if (phase === 'finished') {
         ttl = FINISHED_TTL_MS;
-      } else if (phase === 'playing') {
+      } else if (phase === 'playing' || phase === 'deploy') {
         ttl = PLAYING_TTL_MS;
       } else {
         const nobodyOnline = humanPlayers(room.state).every((p) => !p.connected);

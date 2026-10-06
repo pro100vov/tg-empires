@@ -87,7 +87,11 @@ function Results({ state, ranked, meId, hotseat }: { state: GameState; ranked: P
             {!hotseat && p.id === meId ? ' (вы)' : ''}
           </span>
           <span className="result-score">
-            {p.alive ? `${scoreOf(state, p.id)} очк.` : `пал на ${p.deadRound ?? '?'} р.`}
+            {state.settings.mode === 'wargame'
+              ? `🎯 ${p.stats.squadsKilled} отр.${p.alive ? '' : ` · разбит на ${p.deadRound ?? '?'} р.`}`
+              : p.alive
+                ? `${scoreOf(state, p.id)} очк.`
+                : `пал на ${p.deadRound ?? '?'} р.`}
           </span>
         </div>
       ))}
@@ -141,6 +145,11 @@ export function StatsSheet({ state, me, onClose }: { state: GameState; me: Playe
         <div className="chips">
           <span className="chip">Побед {s.battlesWon}</span>
           <span className="chip">Поражений {s.battlesLost}</span>
+          {state.settings.mode === 'wargame' && (
+            <span className="chip">
+              Отрядов уничтожено {s.squadsKilled} · потеряно {s.squadsLost}
+            </span>
+          )}
           <span className="chip">Выбито {s.unitsKilled}</span>
           <span className="chip">Потеряно {s.unitsLost}</span>
           <span className="chip">Захвачено клеток {s.tilesCaptured}</span>
